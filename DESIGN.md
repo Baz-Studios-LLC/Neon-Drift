@@ -109,8 +109,9 @@ recoverable, but only by earning them, via a rare gold asteroid. ✅ Implemented
   reward is gone. (This is the "adds urgency" resolution of the old open question.)
 - Capped at `LIFE_CAP` (= `START_LIVES`, 3): a gold rock only restores a *lost* life, never above the
   starting count. Purist-safe: a life isn't a powerup.
-- **Telegraph:** the rock shimmers gold with an inner ring; clearing it pops an "EXTRA LIFE" toast +
-  a distinct 1UP jingle (`life_sfx_wav`, separate from the achievement chime).
+- **Telegraph:** a single shimmering gold outline (same shape/chunkiness as any rock — the pulsing
+  colour is what marks it); clearing it pops an "EXTRA LIFE" toast + a distinct 1UP jingle
+  (`life_sfx_wav`, separate from the achievement chime).
 - **Only player shots break it.** Mine blasts spare gold rocks, and a drifting mine bounces off one
   instead of detonating — so a mine can't clear the lineage for you. The **Devourer** won't eat gold
   either (both would hand over a 1UP the player didn't earn).
@@ -119,5 +120,22 @@ Considered and shelved (could layer on later): score extends, boss-clear +1, per
 
 ## Related systems
 
+- **Scoring** (classic-Asteroids values — smaller rock = more points, so *finishing* a rock beats cracking it):
+
+  | Target | Points |
+  | --- | --- |
+  | Asteroid — large / mid / small | 20 / 50 / 100 |
+  | Green (dense) | ×2 (40 / 100 / 200) |
+  | Enemy mob | 300 |
+  | Mine | 150 |
+  | Boss | 3000 |
+  | Warden shield rock (small remnant) | 20 |
+  | Rock swallowed by the warp | `WARP_ROCK_SCORE` (25, low flat — no farming) |
+
+  Gold rocks score like normal rocks (their reward is the life, not points). Score is purely for
+  ranking — it doesn't grant lives.
+- **High scores:** a persisted **top 5** (numeric), saved to `violet-edge.hiscore`. On game over the
+  final score slots into the table (`record_high_score`), the screen shows the board with the new
+  entry lit and a **NEW BEST!** / **TOP 5!** banner, and the main menu shows a **BEST** line.
 - **Achievements:** First Blood, Warden Off, Glutton for Punishment, True Blue (100 blue), Green Thumb (100 green), Edgelord (beat the arc), Purist (beat it with no powerups). New bosses each get one, named for the boss.
 - **Field population:** the on-screen count targets `POP_BASE + wave` (cap `POP_CAP`), topped up from the edges at `SPAWN_INTERVAL`. Edge spawns are ~80% large; a `BIG_FLOOR` keeps large rocks present even at the cap. Rocks that drift fully off-screen are recycled back in *only if large* — small debris usually despawns for good (mids sometimes), so breaking rocks apart can't silt the arena up with an overwhelming cloud of little ones; the top-up refills with fresh large rocks. Freshly-broken fragments get a short grace window (`FRAGMENT_GRACE`) during which they always recycle rather than being culled, so a rock shattered right at the edge can't lose its pieces off-screen before you get a shot. The Warden grabs large/mid rocks for its shield and only resorts to a small one when nothing bigger is on-screen.

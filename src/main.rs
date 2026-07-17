@@ -74,6 +74,7 @@ const MINE_TRIGGER_R: f32 = 92.0; // ship within → the mine arms (blinks)
 const MINE_BLAST_R: f32 = 52.0; // armed + ship within → detonate (kills the ship)
 const MINE_FUSE: f32 = 0.6; // arming time before it can detonate (time to escape)
 const MINE_SCORE: u32 = 150;
+const WARP_ROCK_SCORE: u32 = 25; // a rock swallowed by the warp scores a low flat value (no farming)
 const MINE_SPAWN_INTERVAL: f32 = 2.6;
 const MINE_CHUNK_MULT: f32 = 1.9; // HIDDEN: rocks shattered by a mine blast fling chunks this much faster
 
@@ -632,6 +633,14 @@ struct BlackHole {
 
 #[derive(Resource, Default)]
 struct Score(u32);
+
+// The persisted top-5 scores, sorted descending. `just_placed` is the index THIS run's score landed
+// at (Some when it made the table, for the game-over highlight); it's transient, not saved.
+#[derive(Resource, Default)]
+struct HighScores {
+    top: [u32; 5],
+    just_placed: Option<usize>,
+}
 
 #[derive(Resource)]
 struct Run {
@@ -2658,7 +2667,7 @@ fn black_hole_update(
         for (ae, at, mut av, a) in &mut asteroids {
             let ap = at.translation.truncate();
             if ap.distance(hp) < WARP_CONSUME_R + asteroid_radius(a.size) {
-                score.0 += 30;
+                score.0 += WARP_ROCK_SCORE;
                 burst(&mut commands, ap, rock_color(), 14, 280.0, &mut rng);
                 commands.entity(ae).despawn();
             } else {
@@ -3342,14 +3351,30 @@ fn spawn_pause_ui(mut commands: Commands, font: Res<MenuFont>) {
     });
 }
 
-fn spawn_gameover_ui(mut commands: Commands, score: Res<Score>, font: Res<MenuFont>) {
+fn spawn_gameover_ui(mut commands: Commands, score: Res<Score>, hs: Res<HighScores>, font: Res<MenuFont>) {
     let root = overlay(&mut commands, GameOverUi, 0.72);
-    let score_line = format!("SCORE   {}", score.0);
     let f = &font.0;
+    let gold = Color::srgb(0.98, 0.85, 0.35);
     commands.entity(root).with_children(|p| {
         p.spawn(text_f(f, 62.0, Color::srgb(1.0, 0.3, 0.3), "GAME OVER"));
-        p.spawn(text_f(f, 24.0, Color::srgb(0.85, 0.9, 1.2), &score_line));
-        p.spawn(text_f(f, 20.0, Color::srgb(0.7, 0.85, 1.2), "Restart  (Enter)"));
+        p.spawn(text_f(f, 24.0, Color::srgb(0.85, 0.9, 1.2), &format!("SCORE   {}", score.0)));
+        // banner if this run cracked the table
+        match hs.just_placed {
+            Some(0) => {
+                p.spawn(text_f(f, 26.0, gold, "NEW BEST!"));
+            }
+            Some(_) => {
+                p.spawn(text_f(f, 22.0, gold, "TOP 5!"));
+            }
+            None => {}
+        }
+        // the top-5 table, with this run's placement lit up
+        p.spawn((text_f(f, 18.0, title_color(), "HIGH SCORES"), Node { margin: UiRect::top(Val::Px(10.0)), ..default() }));
+        for (i, &s) in hs.top.iter().enumerate() {
+            let col = if hs.just_placed == Some(i) { gold } else { Color::srgb(0.7, 0.75, 0.9) };
+            p.spawn(text_f(f, 18.0, col, &format!("{}.   {}", i + 1, s)));
+        }
+        p.spawn((text_f(f, 20.0, Color::srgb(0.7, 0.85, 1.2), "Restart  (Enter)"), Node { margin: UiRect::top(Val::Px(10.0)), ..default() }));
         p.spawn(text_f(f, 20.0, Color::srgb(0.7, 0.85, 1.2), "Main Menu  (Esc)"));
     });
 }
@@ -3494,19 +3519,23 @@ fn spawn_frame(commands: &mut Commands, marker: impl Component) {
     ));
 }
 
-fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>, intro: Res<TitleIntroPlayed>, font: Res<MenuFont>) {
+fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>, intro: Res<TitleIntroPlayed>, hs: Res<HighScores>, font: Res<MenuFont>) {
     spawn_frame(&mut commands, MenuUi); // behind the content (spawned first)
     let root = overlay(&mut commands, MenuUi, 0.25); // light — let the starfield show through
     let done = achieved.unlocked.iter().filter(|u| **u).count();
     let f = &font.0;
     // flicker the title on the FIRST show only; later returns start it already lit (past the warm-up)
     let title_age = if intro.0 { NEON_WARMUP } else { 0.0 };
+    let best = hs.top[0];
     commands.entity(root).with_children(|p| {
         p.spawn((MenuTitle { age: title_age }, text_f(f, 82.0, title_color(), "VIOLET EDGE")));
         menu_button(p, f, MenuAction::Play, "PLAY");
         menu_button(p, f, MenuAction::Controls, "CONTROLS");
         menu_button(p, f, MenuAction::Briefing, "BRIEFING");
         menu_button(p, f, MenuAction::Achievements, &format!("ACHIEVEMENTS  ({done} / {})", ACHIEVEMENTS.len()));
+        if best > 0 {
+            p.spawn((text_f(f, 18.0, Color::srgb(0.72, 0.76, 0.95), &format!("BEST   {best}")), Node { margin: UiRect::top(Val::Px(8.0)), ..default() }));
+        }
     });
 }
 
@@ -3890,6 +3919,50 @@ fn read_progress() -> Option<Stats> {
 #[cfg(test)]
 fn save_progress(_s: &Stats) {}
 
+// ─────────────────────────────── high scores (top 5) ──────────────────
+// On game over, slot the final score into the top-5 table if it qualifies, remember where it landed
+// (for the game-over highlight), and persist. Runs before spawn_gameover_ui so the screen sees it.
+fn record_high_score(score: Res<Score>, mut hs: ResMut<HighScores>) {
+    hs.just_placed = None;
+    let s = score.0;
+    if let Some(i) = hs.top.iter().position(|&h| s > h) {
+        for j in (i + 1..hs.top.len()).rev() {
+            hs.top[j] = hs.top[j - 1]; // shift the rest down
+        }
+        hs.top[i] = s;
+        hs.just_placed = Some(i);
+        save_high_scores(&hs);
+    }
+}
+
+fn load_high_scores(mut hs: ResMut<HighScores>) {
+    hs.top = read_high_scores();
+}
+
+#[cfg(not(test))]
+const HISCORE_PATH: &str = "violet-edge.hiscore";
+#[cfg(not(test))]
+fn read_high_scores() -> [u32; 5] {
+    let mut top = [0u32; 5];
+    if let Ok(text) = std::fs::read_to_string(HISCORE_PATH) {
+        for (i, tok) in text.split_whitespace().take(5).enumerate() {
+            top[i] = tok.parse().unwrap_or(0);
+        }
+    }
+    top
+}
+#[cfg(not(test))]
+fn save_high_scores(hs: &HighScores) {
+    let line: Vec<String> = hs.top.iter().map(|s| s.to_string()).collect();
+    let _ = std::fs::write(HISCORE_PATH, line.join(" ")); // best-effort
+}
+#[cfg(test)]
+fn read_high_scores() -> [u32; 5] {
+    [0; 5]
+}
+#[cfg(test)]
+fn save_high_scores(_hs: &HighScores) {}
+
 // Game-Over screen: Enter restarts immediately; Esc quits to the main menu.
 fn gameover_restart(
     keys: Res<ButtonInput<KeyCode>>,
@@ -4172,10 +4245,11 @@ fn main() {
         .insert_resource(GoldRush::default())
         .insert_resource(FireArmed::default())
         .insert_resource(TitleIntroPlayed::default())
+        .insert_resource(HighScores::default())
         .add_event::<SoundFx>()
         .add_event::<MenuClick>()
         .init_state::<GameState>()
-        .add_systems(Startup, (setup, spawn_hud, spawn_toast_root, load_progress, start_music, start_sfx))
+        .add_systems(Startup, (setup, spawn_hud, spawn_toast_root, load_progress, load_high_scores, start_music, start_sfx))
         // always: keep the arena sized, handle pause input, refresh the HUD text
         .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update).chain())
         // always: watch for achievement unlocks + age out toasts + hide the HUD off-run + menu buttons
@@ -4257,7 +4331,7 @@ fn main() {
         .add_systems(OnExit(GameState::Briefing), despawn_briefing_ui)
         .add_systems(OnEnter(GameState::Paused), spawn_pause_ui)
         .add_systems(OnExit(GameState::Paused), despawn_pause_ui)
-        .add_systems(OnEnter(GameState::GameOver), spawn_gameover_ui)
+        .add_systems(OnEnter(GameState::GameOver), (record_high_score, spawn_gameover_ui).chain())
         .add_systems(OnExit(GameState::GameOver), despawn_gameover_ui);
     // dev-only tools (F1 invincibility, F2 wave-skip); compiled out of release builds
     #[cfg(debug_assertions)]
@@ -4674,6 +4748,32 @@ mod tests {
     }
 
     #[test]
+    fn a_top5_score_is_recorded_in_rank_order() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(Score(350));
+        app.insert_resource(HighScores { top: [500, 400, 300, 200, 100], just_placed: None });
+        app.add_systems(Update, record_high_score);
+        app.update();
+        let hs = app.world().resource::<HighScores>();
+        assert_eq!(hs.top, [500, 400, 350, 300, 200], "the score slots in by rank and pushes the rest down");
+        assert_eq!(hs.just_placed, Some(2), "its placement is remembered for the game-over highlight");
+    }
+
+    #[test]
+    fn a_score_below_the_table_is_not_recorded() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(Score(50));
+        app.insert_resource(HighScores { top: [500, 400, 300, 200, 100], just_placed: None });
+        app.add_systems(Update, record_high_score);
+        app.update();
+        let hs = app.world().resource::<HighScores>();
+        assert_eq!(hs.top, [500, 400, 300, 200, 100], "a sub-table score leaves the board unchanged");
+        assert_eq!(hs.just_placed, None, "and doesn't count as a placement");
+    }
+
+    #[test]
     fn ship_dies_on_asteroid_contact() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
@@ -4897,7 +4997,7 @@ mod tests {
         app.update();
         let n = app.world_mut().query::<&Asteroid>().iter(app.world()).count();
         assert_eq!(n, 0, "an asteroid within the consume radius should be eaten");
-        assert!(app.world().resource::<Score>().0 >= 30, "consuming should score");
+        assert_eq!(app.world().resource::<Score>().0, WARP_ROCK_SCORE, "a warp-consumed rock scores the low flat value");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 # Rust build output (large — hundreds of MB once Bevy is compiled)
 /target
 
-# runtime achievement/progress save (generated per-machine)
+# runtime saves (generated per-machine): achievements/progress + high scores
 *.save
+*.hiscore
