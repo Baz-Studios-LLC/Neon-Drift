@@ -89,18 +89,23 @@ content still repeats 1–10.)
 | IV — Deep Belt | 31–40 | **Crystal** (reflects) *or* **Ice** (shard-burst) — TBD | — | Hive (35), Prism (40) |
 | V — The Core | 41–50 | **Void** (swallows bullets) *or* **Magnetic** (bends fire) — TBD | — | Gemini (45), Progenitor (50) |
 
-## Life economy (proposed — decision pending)
+## Life economy (chosen: gold 1UP rock)
 
-50 levels on 3 lives is likely impossible, especially a no-powerup **Purist** run. We need earn-able
-life recovery that stays skill-gated (not a giveaway). Candidates — cap every source at a shared max
-(~5) so lives can't snowball:
+50 levels on 3 lives is likely impossible, especially a no-powerup **Purist** run — so lives are
+recoverable, but only by earning them. **Chosen mechanism: a rare gold asteroid.**
 
-- **Score extends (capped)** — *leading.* Classic Asteroids: a free ship at score thresholds (e.g.
-  15k, then every 30k). Skill-scaled, on-theme, and works for Purist runs since lives aren't powerups.
-- **Boss-clear +1 (capped)** — a life per boss defeated; reliable milestone recovery, pair with a low cap.
-- **Rare gold 1UP rock** — a gold asteroid occasionally drifts in; break it for a life. Discovery
-  flavor, low reliability; good as spice on top of another source.
-- **Perfect-wave meter** — a no-hit wave fills a meter toward a life; rewards clean play, hardest to telegraph.
+- **Low chance per wave** a gold asteroid drifts in (a distinct gold rock; otherwise behaves like a
+  normal rock and splits when shot).
+- You must **destroy the whole gold lineage** — the rock *and* every gold fragment it breaks into —
+  to claim **+1 life**. Popping the big one isn't enough; miss a shard and the life is forfeit.
+- Capped at a shared max (~5) so lives never snowball. Purist-safe: a life isn't a powerup.
+
+Open at implementation:
+- Do gold fragments that drift off-screen despawn (adds urgency — catch them before they scatter) or
+  stay in play (always claimable)? Lean fair per the difficult-but-fair rule.
+- Telegraphing "clear them all" — e.g. a gold-remaining pip, or the life only drops off the *last* fragment.
+
+Considered and shelved (could layer on later): score extends, boss-clear +1, perfect-wave meter.
 
 ## Related systems
 
