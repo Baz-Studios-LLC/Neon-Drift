@@ -1118,7 +1118,12 @@ fn detonate(
                 if explosive.is_some() {
                     commands.entity(ae).insert(Detonating { fuse: ORANGE_FUSE }); // chain!
                 } else {
-                    break_asteroid(&mut commands, &mut rng, &mut score, ae, at.translation.truncate(), a.size, 1.4, a.dense, false);
+                    // caught in the AOE → DESTROYED outright (obliterated, not split into chunks)
+                    let ap = at.translation.truncate();
+                    burst(&mut commands, ap, if a.dense { dense_color() } else { rock_color() }, 8, 240.0, &mut rng);
+                    let base = match a.size { 3 => 20, 2 => 50, _ => 100 };
+                    score.0 += if a.dense { base * 2 } else { base };
+                    commands.entity(ae).despawn();
                 }
             }
         }
@@ -4929,9 +4934,9 @@ mod tests {
             Explosive,
             Detonating { fuse: 0.0 },
         ));
-        // a plain small rock in range → shattered
+        // a plain LARGE rock in range → obliterated outright (a normal break would leave 2 chunks)
         app.world_mut().spawn((
-            Asteroid { size: 1, verts: vec![Vec2::X * 22.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 },
+            Asteroid { size: 3, verts: vec![Vec2::X * 88.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 },
             Velocity(Vec2::ZERO),
             Transform::from_xyz(30.0, 0.0, 0.0),
         ));
@@ -4956,7 +4961,7 @@ mod tests {
         assert_eq!(app.world_mut().query_filtered::<(), With<Detonating>>().iter(app.world()).count(), 1, "the nearby orange is lit — a chain reaction");
         assert_eq!(app.world_mut().query_filtered::<(), With<Gold>>().iter(app.world()).count(), 1, "gold is spared by the blast");
         let plain = app.world_mut().query_filtered::<(), (With<Asteroid>, Without<Explosive>, Without<Gold>)>().iter(app.world()).count();
-        assert_eq!(plain, 0, "the plain rock in range is shattered");
+        assert_eq!(plain, 0, "the large plain rock is obliterated outright — no leftover chunks");
     }
 
     #[test]
