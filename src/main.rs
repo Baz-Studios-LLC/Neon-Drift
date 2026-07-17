@@ -373,9 +373,15 @@ fn kill_enemy(commands: &mut Commands, score: &mut Score, sfx: &mut EventWriter<
 enum GameState {
     #[default]
     Menu,
+    Achievements, // the achievements screen, reached from the main menu
     Playing,
     Paused,
     GameOver,
+}
+
+// A run is "active" (grid + HUD drawn) in these states, not on the menu screens.
+fn run_active(state: &GameState) -> bool {
+    matches!(state, GameState::Playing | GameState::Paused | GameState::GameOver)
 }
 
 // One filter for "everything spawned during a run" — used to wipe the field when quitting to the
@@ -528,6 +534,10 @@ struct PauseUi;
 struct GameOverUi;
 #[derive(Component)]
 struct MenuUi;
+#[derive(Component)]
+struct AchievementsUi;
+#[derive(Component)]
+struct Hud; // HUD roots — hidden on the menu screens
 #[derive(Component)]
 struct WaveText; // top-center "WAVE n  M:SS"
 #[derive(Component)]
@@ -751,12 +761,14 @@ fn setup(mut commands: Commands) {
 fn spawn_hud(mut commands: Commands) {
     let label = Color::srgb(0.7, 0.85, 1.2);
     commands.spawn((
+        Hud,
         Text::new("LIVES"),
         TextFont { font_size: 18.0, ..default() },
         TextColor(label),
         Node { position_type: PositionType::Absolute, top: Val::Px(14.0), right: Val::Px(22.0), ..default() },
     ));
     commands.spawn((
+        Hud,
         ScoreText,
         Text::new("SCORE 0"),
         TextFont { font_size: 18.0, ..default() },
@@ -765,14 +777,17 @@ fn spawn_hud(mut commands: Commands) {
     ));
     // centered wrapper so the wave/timer sits at the top-center
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(12.0),
-            left: Val::Px(0.0),
-            width: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            ..default()
-        })
+        .spawn((
+            Hud,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(12.0),
+                left: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
         .with_children(|p| {
             p.spawn((
                 WaveText,
@@ -783,16 +798,19 @@ fn spawn_hud(mut commands: Commands) {
         });
     // big center-screen "WAVE n" flash — alpha driven by wave_banner_update
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(0.0),
-            left: Val::Px(0.0),
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
+        .spawn((
+            Hud,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(0.0),
+                left: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
         .with_children(|p| {
             p.spawn((
                 WaveBannerText,
@@ -2581,8 +2599,8 @@ fn render(
     arena: Res<Arena>,
     run: Res<Run>,
     dev: Res<Dev>,
-    // warp + chain paired into one tuple param to stay within Bevy's 16-param system limit
-    abilities: (Res<Warp>, Res<Chain>),
+    // warp + chain + state grouped into one tuple param to stay within Bevy's 16-param system limit
+    abilities: (Res<Warp>, Res<Chain>, Res<State<GameState>>),
     wf: Res<WarpField>,
     stars: Query<(&Star, &Transform)>,
     ships: Query<(&Ship, &Transform)>,
@@ -2598,8 +2616,9 @@ fn render(
     let h = arena.half;
     let t = time.elapsed_secs();
     let (warp_res, chain) = (&abilities.0, &abilities.1);
+    let show_run = run_active(abilities.2.get()); // grid + HUD icons only while a run is on
 
-    // stars (backmost)
+    // stars (backmost) — always drawn, so the menu keeps a subtle starfield
     let star = star_color();
     for (s, st) in &stars {
         let tw = 0.35 + 0.65 * (t * 1.6 + s.phase).sin().max(0.0);
@@ -2609,9 +2628,9 @@ fn render(
         gizmos.line_2d(c - Vec2::Y * 1.3, c + Vec2::Y * 1.3, col);
     }
 
-    // grid — faint, brighter per-line shimmer; bends toward an active warp hole
-    // (and rubber-snaps back afterward). Straight 2-point lines unless warping.
-    let grid = grid_color();
+    // grid — faint, brighter per-line shimmer; bends toward an active warp hole (and rubber-snaps
+    // back). Only while a run is on — off-run the color is zeroed so the menu shows no grid.
+    let grid = dim(grid_color(), if show_run { 1.0 } else { 0.0 });
     let warping = wf.amount.abs() > 0.001;
     const SUBDIV: usize = 14;
     let mut i = 0;
@@ -2823,17 +2842,19 @@ fn render(
         gizmos.linestrip_2d(pts, sc);
     }
 
-    // lives HUD icons (top-right, under the "LIVES" label)
-    for k in 0..run.lives.max(0) {
-        let p = Vec2::new(h.x - 32.0 - k as f32 * 24.0, h.y - 48.0);
-        let icon = [
-            p + Vec2::new(0.0, 9.0),
-            p + Vec2::new(-7.0, -7.0),
-            p + Vec2::new(0.0, -3.0),
-            p + Vec2::new(7.0, -7.0),
-            p + Vec2::new(0.0, 9.0),
-        ];
-        gizmos.linestrip_2d(icon, sc);
+    // lives HUD icons (top-right, under the "LIVES" label) — only while a run is on
+    if show_run {
+        for k in 0..run.lives.max(0) {
+            let p = Vec2::new(h.x - 32.0 - k as f32 * 24.0, h.y - 48.0);
+            let icon = [
+                p + Vec2::new(0.0, 9.0),
+                p + Vec2::new(-7.0, -7.0),
+                p + Vec2::new(0.0, -3.0),
+                p + Vec2::new(7.0, -7.0),
+                p + Vec2::new(0.0, 9.0),
+            ];
+            gizmos.linestrip_2d(icon, sc);
+        }
     }
 
     // warp charge pips (bottom-center): lit per available charge + a refill bar
@@ -3044,7 +3065,7 @@ fn pause_toggle(
                 next.set(GameState::Menu); // quit the run → OnEnter(Menu) wipes the field
             }
         }
-        GameState::Menu | GameState::GameOver => {}
+        GameState::Menu | GameState::Achievements | GameState::GameOver => {}
     }
 }
 
@@ -3153,6 +3174,10 @@ fn menu_start(
     mut warp: ResMut<Warp>,
     mut progress: (ResMut<BossState>, ResMut<Chain>, ResMut<MassShot>, ResMut<RunFlags>), // bundled (16-param limit)
 ) {
+    if keys.just_pressed(KeyCode::KeyA) {
+        next.set(GameState::Achievements);
+        return;
+    }
     if !(keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space)) {
         return;
     }
@@ -3160,13 +3185,26 @@ fn menu_start(
     next.set(GameState::Playing);
 }
 
+// Deep neon violet for menu titles — B-dominant with very low green so it reads purple, not the
+// pink/white the brighter ship colour blooms into.
+fn title_color() -> Color {
+    Color::srgb(2.2, 0.35, 5.5)
+}
+
 fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>) {
     let root = overlay(&mut commands, MenuUi);
     let done = achieved.unlocked.iter().filter(|u| **u).count();
     commands.entity(root).with_children(|p| {
-        p.spawn(text(74.0, ship_color(), "VIOLET EDGE"));
+        p.spawn(text(74.0, title_color(), "VIOLET EDGE"));
         p.spawn(text(24.0, Color::srgb(0.7, 0.85, 1.2), "Enter  —  Play"));
-        p.spawn(text(18.0, Color::srgb(0.6, 0.7, 1.0), &format!("ACHIEVEMENTS   {done} / {}", ACHIEVEMENTS.len())));
+        p.spawn(text(22.0, Color::srgb(0.7, 0.85, 1.2), &format!("A  —  Achievements  ({done} / {})", ACHIEVEMENTS.len())));
+    });
+}
+
+fn spawn_achievements_ui(mut commands: Commands, achieved: Res<Achievements>) {
+    let root = overlay(&mut commands, AchievementsUi);
+    commands.entity(root).with_children(|p| {
+        p.spawn(text(48.0, title_color(), "ACHIEVEMENTS"));
         for (i, &a) in ACHIEVEMENTS.iter().enumerate() {
             let (name, desc) = ach_meta(a);
             // earned → bright name + description; locked → hide the (fun) name, show the goal
@@ -3175,9 +3213,33 @@ fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>) {
             } else {
                 (Color::srgb(0.4, 0.45, 0.6), format!("???  —  {desc}"))
             };
-            p.spawn(text(14.0, col, &line));
+            p.spawn(text(16.0, col, &line));
         }
+        p.spawn(text(20.0, Color::srgb(0.7, 0.85, 1.2), "Esc  —  Back"));
     });
+}
+
+fn despawn_achievements_ui(mut commands: Commands, q: Query<Entity, With<AchievementsUi>>) {
+    for e in &q {
+        commands.entity(e).despawn();
+    }
+}
+
+// The achievements screen: Esc (or Enter) returns to the main menu.
+fn achievements_back(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<GameState>>) {
+    if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Enter) {
+        next.set(GameState::Menu);
+    }
+}
+
+// Hide the persistent HUD on the menu screens; show it during a run.
+fn hud_visibility(state: Res<State<GameState>>, mut q: Query<&mut Visibility, With<Hud>>) {
+    let vis = if run_active(state.get()) { Visibility::Visible } else { Visibility::Hidden };
+    for mut v in &mut q {
+        if *v != vis {
+            *v = vis;
+        }
+    }
 }
 
 fn despawn_menu_ui(mut commands: Commands, q: Query<Entity, With<MenuUi>>) {
@@ -3580,8 +3642,8 @@ fn main() {
         .add_systems(Startup, (setup, spawn_hud, spawn_toast_root, load_progress, start_music, start_sfx))
         // always: keep the arena sized, handle pause input, refresh the HUD text
         .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update).chain())
-        // always: watch for achievement unlocks + age out toasts
-        .add_systems(Update, (achievements, toast_update))
+        // always: watch for achievement unlocks + age out toasts + hide the HUD off-run
+        .add_systems(Update, (achievements, toast_update, hud_visibility))
         // render in PostUpdate so it ALWAYS runs after every Update system (incl.
         // ship_bounds) — draws final positions, no border ghosting; runs in all states
         .add_systems(PostUpdate, (render, render_boss, render_extras))
@@ -3639,9 +3701,12 @@ fn main() {
         )
         .add_systems(Update, (music_director, play_sfx))
         .add_systems(Update, menu_start.run_if(in_state(GameState::Menu)))
+        .add_systems(Update, achievements_back.run_if(in_state(GameState::Achievements)))
         .add_systems(Update, gameover_restart.run_if(in_state(GameState::GameOver)))
         .add_systems(OnEnter(GameState::Menu), (clear_field, spawn_menu_ui))
         .add_systems(OnExit(GameState::Menu), despawn_menu_ui)
+        .add_systems(OnEnter(GameState::Achievements), spawn_achievements_ui)
+        .add_systems(OnExit(GameState::Achievements), despawn_achievements_ui)
         .add_systems(OnEnter(GameState::Paused), spawn_pause_ui)
         .add_systems(OnExit(GameState::Paused), despawn_pause_ui)
         .add_systems(OnEnter(GameState::GameOver), spawn_gameover_ui)
