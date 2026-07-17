@@ -3114,23 +3114,41 @@ fn text(font_size: f32, color: Color, s: &str) -> (Text, TextFont, TextColor) {
     (Text::new(s), TextFont { font_size, ..default() }, TextColor(color))
 }
 
-fn spawn_pause_ui(mut commands: Commands) {
+// The embedded Orbitron display font — used across the menu screens (the tiny in-game HUD keeps
+// the default mono for crispness).
+#[derive(Resource)]
+struct MenuFont(Handle<Font>);
+
+fn load_font(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
+    let bytes = include_bytes!("../assets/fonts/static/Orbitron-Bold.ttf").to_vec();
+    let font = fonts.add(Font::try_from_bytes(bytes).expect("Orbitron-Bold.ttf is a valid TTF"));
+    commands.insert_resource(MenuFont(font));
+}
+
+// Like `text`, but in the menu (Orbitron) font.
+fn text_f(font: &Handle<Font>, font_size: f32, color: Color, s: &str) -> (Text, TextFont, TextColor) {
+    (Text::new(s), TextFont { font: font.clone(), font_size, ..default() }, TextColor(color))
+}
+
+fn spawn_pause_ui(mut commands: Commands, font: Res<MenuFont>) {
     let root = overlay(&mut commands, PauseUi, 0.72);
+    let f = &font.0;
     commands.entity(root).with_children(|p| {
-        p.spawn(text(56.0, title_color(), "PAUSED"));
-        p.spawn(text(22.0, Color::srgb(0.7, 0.85, 1.2), "Resume  (Esc)"));
-        p.spawn(text(22.0, Color::srgb(0.7, 0.85, 1.2), "Quit to Menu  (Q)"));
+        p.spawn(text_f(f, 54.0, title_color(), "PAUSED"));
+        p.spawn(text_f(f, 20.0, Color::srgb(0.7, 0.85, 1.2), "Resume  (Esc)"));
+        p.spawn(text_f(f, 20.0, Color::srgb(0.7, 0.85, 1.2), "Quit to Menu  (Q)"));
     });
 }
 
-fn spawn_gameover_ui(mut commands: Commands, score: Res<Score>) {
+fn spawn_gameover_ui(mut commands: Commands, score: Res<Score>, font: Res<MenuFont>) {
     let root = overlay(&mut commands, GameOverUi, 0.72);
     let score_line = format!("SCORE   {}", score.0);
+    let f = &font.0;
     commands.entity(root).with_children(|p| {
-        p.spawn(text(64.0, Color::srgb(1.0, 0.3, 0.3), "GAME OVER"));
-        p.spawn(text(26.0, Color::srgb(0.85, 0.9, 1.2), &score_line));
-        p.spawn(text(22.0, Color::srgb(0.7, 0.85, 1.2), "Restart  (Enter)"));
-        p.spawn(text(22.0, Color::srgb(0.7, 0.85, 1.2), "Main Menu  (Esc)"));
+        p.spawn(text_f(f, 62.0, Color::srgb(1.0, 0.3, 0.3), "GAME OVER"));
+        p.spawn(text_f(f, 24.0, Color::srgb(0.85, 0.9, 1.2), &score_line));
+        p.spawn(text_f(f, 20.0, Color::srgb(0.7, 0.85, 1.2), "Restart  (Enter)"));
+        p.spawn(text_f(f, 20.0, Color::srgb(0.7, 0.85, 1.2), "Main Menu  (Esc)"));
     });
 }
 
@@ -3222,7 +3240,7 @@ fn ach_earned_color() -> Color {
 
 // A slick menu button — a bordered violet pill with a label. `button_shimmer` animates the hover
 // glow and `button_click` fires its `MenuAction`; the keyboard shortcuts do the same thing.
-fn menu_button(p: &mut ChildSpawnerCommands, action: MenuAction, label: &str) {
+fn menu_button(p: &mut ChildSpawnerCommands, font: &Handle<Font>, action: MenuAction, label: &str) {
     p.spawn((
         MenuButton(action),
         Button,
@@ -3239,7 +3257,7 @@ fn menu_button(p: &mut ChildSpawnerCommands, action: MenuAction, label: &str) {
         BackgroundColor(Color::srgba(0.10, 0.04, 0.20, 0.45)),
     ))
     .with_children(|b| {
-        b.spawn(text(26.0, Color::srgb(0.72, 0.82, 1.0), label));
+        b.spawn(text_f(font, 24.0, Color::srgb(0.72, 0.82, 1.0), label));
     });
 }
 
@@ -3263,22 +3281,24 @@ fn spawn_frame(commands: &mut Commands, marker: impl Component) {
     ));
 }
 
-fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>) {
+fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>, font: Res<MenuFont>) {
     spawn_frame(&mut commands, MenuUi); // behind the content (spawned first)
     let root = overlay(&mut commands, MenuUi, 0.25); // light — let the starfield show through
     let done = achieved.unlocked.iter().filter(|u| **u).count();
+    let f = &font.0;
     commands.entity(root).with_children(|p| {
-        p.spawn((MenuTitle { age: 0.0 }, text(78.0, title_color(), "VIOLET EDGE")));
-        menu_button(p, MenuAction::Play, "Play");
-        menu_button(p, MenuAction::Achievements, &format!("Achievements  ({done} / {})", ACHIEVEMENTS.len()));
+        p.spawn((MenuTitle { age: 0.0 }, text_f(f, 82.0, title_color(), "VIOLET EDGE")));
+        menu_button(p, f, MenuAction::Play, "PLAY");
+        menu_button(p, f, MenuAction::Achievements, &format!("ACHIEVEMENTS  ({done} / {})", ACHIEVEMENTS.len()));
     });
 }
 
-fn spawn_achievements_ui(mut commands: Commands, achieved: Res<Achievements>) {
+fn spawn_achievements_ui(mut commands: Commands, achieved: Res<Achievements>, font: Res<MenuFont>) {
     spawn_frame(&mut commands, AchievementsUi);
     let root = overlay(&mut commands, AchievementsUi, 0.5);
+    let f = &font.0;
     commands.entity(root).with_children(|p| {
-        p.spawn((MenuTitle { age: 0.0 }, text(46.0, title_color(), "ACHIEVEMENTS")));
+        p.spawn((MenuTitle { age: 0.0 }, text_f(f, 48.0, title_color(), "ACHIEVEMENTS")));
         // two-column table: name | description (aligns cleanly, no separator glyph)
         for (i, &a) in ACHIEVEMENTS.iter().enumerate() {
             let (name, desc) = ach_meta(a);
@@ -3292,16 +3312,16 @@ fn spawn_achievements_ui(mut commands: Commands, achieved: Res<Achievements>) {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
                 column_gap: Val::Px(28.0),
-                width: Val::Px(720.0),
+                width: Val::Px(760.0),
                 padding: UiRect::vertical(Val::Px(3.0)),
                 ..default()
             })
             .with_children(|row| {
-                row.spawn((text(19.0, namecol, name), Node { width: Val::Px(300.0), ..default() }));
-                row.spawn(text(16.0, desccol, desc));
+                row.spawn((text_f(f, 17.0, namecol, name), Node { width: Val::Px(330.0), ..default() }));
+                row.spawn(text_f(f, 14.0, desccol, desc));
             });
         }
-        menu_button(p, MenuAction::Back, "Back");
+        menu_button(p, f, MenuAction::Back, "BACK");
     });
 }
 
@@ -3809,7 +3829,7 @@ fn main() {
         .add_event::<SoundFx>()
         .add_event::<MenuClick>()
         .init_state::<GameState>()
-        .add_systems(Startup, (setup, spawn_hud, spawn_toast_root, load_progress, start_music, start_sfx))
+        .add_systems(Startup, (setup, spawn_hud, spawn_toast_root, load_progress, load_font, start_music, start_sfx))
         // always: keep the arena sized, handle pause input, refresh the HUD text
         .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update).chain())
         // always: watch for achievement unlocks + age out toasts + hide the HUD off-run + menu buttons
