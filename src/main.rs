@@ -1538,8 +1538,9 @@ fn wave_timer(
         let dense = roll_dense(wave.level, &mut rng);
         spawn_edge_asteroid(&mut commands, arena.half, &mut rng, dense, false);
     }
-    // rare gold 1UP rock — only on normal waves, and never while a previous gold hunt is unresolved
-    if !is_boss_wave(wave.level) && !rush.active && rng.gen_bool(GOLD_CHANCE) {
+    // rare gold 1UP rock on any wave advance (boss waves included — the Devourer won't eat it and a
+    // rock the Warden grabs is just a shoot-it-off-the-shield target); never while a hunt is unresolved
+    if !rush.active && rng.gen_bool(GOLD_CHANCE) {
         spawn_gold_rock(&mut commands, arena.half, &mut rng);
         rush.active = true;
         rush.forfeited = false;
@@ -4600,6 +4601,31 @@ mod tests {
         }
         let gold = app.world_mut().query_filtered::<(), With<Gold>>().iter(app.world()).count();
         assert!(gold >= 1, "wave_timer must be able to roll a gold rock on a non-boss advance");
+    }
+
+    #[test]
+    fn gold_can_roll_entering_a_boss_wave() {
+        // advancing INTO a boss wave (4 -> 5) is no longer excluded from the gold roll
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(WaveBanner::default());
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        app.insert_resource(Wave { level: 4, timer: 0.0, calm: 0.0 });
+        app.insert_resource(GoldRush::default());
+        app.add_systems(Update, wave_timer);
+        for _ in 0..120 {
+            {
+                let mut w = app.world_mut().resource_mut::<Wave>();
+                w.level = 4; // advancing to 5 = a boss wave
+                w.timer = 0.0;
+            }
+            app.world_mut().resource_mut::<GoldRush>().active = false;
+            app.update();
+        }
+        assert!(
+            app.world_mut().query_filtered::<(), With<Gold>>().iter(app.world()).count() >= 1,
+            "a gold rock may spawn when advancing into a boss wave"
+        );
     }
 
     #[test]
