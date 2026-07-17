@@ -3325,7 +3325,7 @@ fn spawn_achievements_ui(mut commands: Commands, achieved: Res<Achievements>, fo
     let root = overlay(&mut commands, AchievementsUi, 0.5);
     let f = &font.0;
     commands.entity(root).with_children(|p| {
-        p.spawn((MenuTitle { age: 0.0 }, text_f(f, 48.0, title_color(), "ACHIEVEMENTS")));
+        p.spawn(text_f(f, 48.0, title_color(), "ACHIEVEMENTS")); // static — no neon warm-up here
         // two-column table: name | description (aligns cleanly, no separator glyph)
         for (i, &a) in ACHIEVEMENTS.iter().enumerate() {
             let (name, desc) = ach_meta(a);
@@ -3425,10 +3425,11 @@ fn button_click(mut clicks: EventWriter<MenuClick>, q: Query<(&Interaction, &Men
     }
 }
 
-const NEON_WARMUP: f32 = 2.2; // seconds the title spends flickering on like a neon sign
-// scripted on-windows during the warm-up: blink … blink … (long pause) … blink-into-steady.
-// Reads as a deliberate "1, 2 …… 3-on" instead of a fast erratic buzz.
-const NEON_BLINKS: [(f32, f32); 3] = [(0.25, 0.45), (0.75, 0.95), (1.85, NEON_WARMUP)];
+const NEON_WARMUP: f32 = 2.3; // seconds the title spends warming up like a neon sign
+// Two crisp blinks and a dark pause; the third strike is a soft glow-up (below), not a hard snap.
+// Reads as a deliberate "1, 2 …… and it catches" instead of a fast erratic buzz.
+const NEON_BLINKS: [(f32, f32); 2] = [(0.25, 0.45), (0.75, 0.95)];
+const NEON_FADE_START: f32 = 1.55; // the tube "catches" here and fades up smoothly to NEON_WARMUP
 
 // Neon flicker-on for the title (scripted blinks settling into a steady breathe), and a matching
 // pulse on the frame border. `dim` scales the (≤1) UI colours, so b<1 reads as the sign "off".
@@ -3440,9 +3441,15 @@ fn menu_title_fx(time: Res<Time>, mut titles: Query<(&mut MenuTitle, &mut TextCo
         title.age += dt;
         let a = title.age;
         let b = if a >= NEON_WARMUP {
-            0.78 + 0.22 * (a * 1.6).sin() // settled breathe
+            // settled: a subtle breathe that starts at full, so the glow-up hands off seamlessly
+            0.85 + 0.15 * ((a - NEON_WARMUP) * 1.6).cos()
+        } else if a >= NEON_FADE_START {
+            // third strike: a soft smoothstep glow-up (dark → full) instead of a hard snap
+            let t = (a - NEON_FADE_START) / (NEON_WARMUP - NEON_FADE_START);
+            let s = t * t * (3.0 - 2.0 * t);
+            0.05 + s * 0.95
         } else if NEON_BLINKS.iter().any(|&(s, e)| a >= s && a < e) {
-            1.0 // lit blink
+            1.0 // crisp blink
         } else {
             0.05 // dark between blinks
         };
@@ -3858,7 +3865,9 @@ fn main() {
         // always: keep the arena sized, handle pause input, refresh the HUD text
         .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update).chain())
         // always: watch for achievement unlocks + age out toasts + hide the HUD off-run + menu buttons
-        .add_systems(Update, (achievements, toast_update, hud_visibility, button_shimmer, button_click, menu_title_fx))
+        .add_systems(Update, (achievements, toast_update, hud_visibility, button_shimmer, button_click))
+        // the neon warm-up + frame pulse is a START-MENU flourish only (not the achievements screen)
+        .add_systems(Update, menu_title_fx.run_if(in_state(GameState::Menu)))
         // render in PostUpdate so it ALWAYS runs after every Update system (incl.
         // ship_bounds) — draws final positions, no border ghosting; runs in all states
         .add_systems(PostUpdate, (render, render_boss, render_extras))
