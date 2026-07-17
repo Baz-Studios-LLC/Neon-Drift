@@ -603,6 +603,77 @@ struct MassShot {
     active: bool,
 }
 
+// ─────────────────────────────── achievements ─────────────────────────
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ach {
+    FirstBlood,
+    Warden,
+    Glutton,
+    TrueBlue,
+    GreenThumb,
+    Edgelord,
+    Purist,
+}
+// Order defines the index into `Achievements.unlocked` and the menu list.
+const ACHIEVEMENTS: [Ach; 7] =
+    [Ach::FirstBlood, Ach::Warden, Ach::Glutton, Ach::TrueBlue, Ach::GreenThumb, Ach::Edgelord, Ach::Purist];
+
+fn ach_meta(a: Ach) -> (&'static str, &'static str) {
+    match a {
+        Ach::FirstBlood => ("First Blood", "Destroy an enemy ship"),
+        Ach::Warden => ("Warden Off", "Defeat the Warden — boss 1"),
+        Ach::Glutton => ("Glutton for Punishment", "Defeat the Glutton — boss 2"),
+        Ach::TrueBlue => ("True Blue", "Destroy 100 blue asteroids"),
+        Ach::GreenThumb => ("Green Thumb", "Destroy 100 dense green asteroids"),
+        Ach::Edgelord => ("Edgelord", "Beat the game (clear the wave 1-10 arc)"),
+        Ach::Purist => ("Purist", "Beat the game without a single powerup"),
+    }
+}
+
+fn ach_met(a: Ach, s: &Stats) -> bool {
+    match a {
+        Ach::FirstBlood => s.enemies >= 1,
+        Ach::Warden => s.warden,
+        Ach::Glutton | Ach::Edgelord => s.glutton, // beating boss 2 IS clearing the arc
+        Ach::TrueBlue => s.blue >= 100,
+        Ach::GreenThumb => s.green >= 100,
+        Ach::Purist => s.no_powerups,
+    }
+}
+
+// LIFETIME progress — accumulates across runs and is persisted to disk (see load/save_progress).
+// NOT reset by `reset_run`.
+#[derive(Resource, Default, Clone, Copy)]
+struct Stats {
+    blue: u32,         // blue asteroids destroyed (lifetime)
+    green: u32,        // dense green asteroids destroyed (lifetime)
+    enemies: u32,      // enemy ships destroyed (lifetime)
+    warden: bool,      // ever defeated boss 1
+    glutton: bool,     // ever defeated boss 2 (= beat the arc)
+    no_powerups: bool, // ever beat boss 2 having grabbed no powerup that run
+}
+
+// Which achievements are unlocked (drives the toast + the menu list). Initialized from the loaded
+// Stats at startup; the `achievements` system flips a bool + fires a toast the first time each is met.
+#[derive(Resource, Default)]
+struct Achievements {
+    unlocked: [bool; ACHIEVEMENTS.len()],
+}
+
+// Per-RUN flags, cleared each run by `reset_run`.
+#[derive(Resource, Default)]
+struct RunFlags {
+    powerup_used: bool, // grabbed any pickup this run (for the Purist achievement)
+}
+
+#[derive(Component)]
+struct ToastRoot; // persistent top-center column that unlock toasts stack into
+#[derive(Component)]
+struct Toast {
+    life: f32,
+}
+const TOAST_LIFE: f32 = 3.5; // seconds an unlock toast lingers
+
 fn is_boss_wave(level: i32) -> bool {
     level % BOSS_WAVE_INTERVAL == 0
 }
@@ -1147,6 +1218,7 @@ fn collisions(
     mut devourers: Query<(&Transform, &mut Devourer)>,
     mut score: ResMut<Score>,
     mut sfx: EventWriter<SoundFx>,
+    mut stats: ResMut<Stats>,
 ) {
     let mut rng = rand::thread_rng();
     let mut dead_b: HashSet<Entity> = HashSet::new();
@@ -1177,6 +1249,11 @@ fn collisions(
                     dead_a.insert(ae);
                     break_asteroid(&mut commands, &mut rng, &mut score, ae, ap, a.size, 1.0, a.dense);
                     sfx.write(SoundFx::Break(a.size));
+                    if a.dense {
+                        stats.green += 1;
+                    } else {
+                        stats.blue += 1;
+                    }
                 }
                 break;
             }
@@ -1218,6 +1295,7 @@ fn collisions(
                 dead_e.insert(ene);
                 commands.entity(be).despawn();
                 kill_enemy(&mut commands, &mut score, &mut sfx, ene, ep, &mut rng); // dies in one shot
+                stats.enemies += 1;
                 break;
             }
         }
@@ -1841,6 +1919,7 @@ fn boss_update(
     mut wave: ResMut<Wave>,
     mut banner: ResMut<WaveBanner>,
     mut sfx: EventWriter<SoundFx>,
+    mut stats: ResMut<Stats>,
     dev: Res<Dev>,
     ships: Query<(Entity, &Transform, &Ship), Without<Boss>>,
     mut bosses: Query<(Entity, &mut Transform, &mut Boss)>,
@@ -1876,6 +1955,7 @@ fn boss_update(
                         Transform::from_xyz(0.0, 0.0, 0.0),
                     ));
                 }
+                stats.warden = true; // achievement: defeated the Warden
                 defeat_boss(&mut score, &mut wave, &mut banner);
             }
             continue; // no movement / contact / damage while it dies
@@ -1942,6 +2022,8 @@ fn devourer_update(
     mut score: ResMut<Score>,
     mut wave: ResMut<Wave>,
     mut banner: ResMut<WaveBanner>,
+    mut stats: ResMut<Stats>,
+    flags: Res<RunFlags>,
     dev: Res<Dev>,
     mut sfx: EventWriter<SoundFx>,
     ships: Query<(Entity, &Transform, &Ship), Without<Devourer>>,
@@ -1975,6 +2057,10 @@ fn devourer_update(
                     Velocity(pdir * PICKUP_DRIFT),
                     Transform::from_xyz(0.0, 0.0, 0.0),
                 ));
+                stats.glutton = true; // achievement: defeated the Glutton (= beat the arc)
+                if !flags.powerup_used {
+                    stats.no_powerups = true; // …and did it with no powerups
+                }
                 defeat_boss(&mut score, &mut wave, &mut banner);
             }
 
@@ -2217,6 +2303,7 @@ fn chain_update(
     arena: Res<Arena>,
     mut score: ResMut<Score>,
     mut sfx: EventWriter<SoundFx>,
+    mut stats: ResMut<Stats>,
     mut chains: Query<(Entity, &Transform, &mut ChainShot)>,
     asteroids: Query<(Entity, &Transform, &Asteroid), (Without<Mine>, Without<Shielded>)>,
     enemies: Query<(Entity, &Transform), With<Enemy>>,
@@ -2246,6 +2333,11 @@ fn chain_update(
                 // chain beam shears dense rocks outright — the beam ignores hp, like a mine
                 break_asteroid(&mut commands, &mut rng, &mut score, ae, ap, ast.size, 1.0, ast.dense);
                 sfx.write(SoundFx::Break(ast.size));
+                if ast.dense {
+                    stats.green += 1;
+                } else {
+                    stats.blue += 1;
+                }
             }
         }
         for (ee, et) in &enemies {
@@ -2257,6 +2349,7 @@ fn chain_update(
             if seg_dist2(ep, a, b) < rr * rr {
                 dead.insert(ee);
                 kill_enemy(&mut commands, &mut score, &mut sfx, ee, ep, &mut rng);
+                stats.enemies += 1;
             }
         }
         for (me, mt) in &mines {
@@ -2287,6 +2380,7 @@ fn pickup_update(
     arena: Res<Arena>,
     mut chain: ResMut<Chain>,
     mut mass: ResMut<MassShot>,
+    mut flags: ResMut<RunFlags>,
     ships: Query<&Transform, With<Ship>>,
     bullets: Query<(Entity, &Transform), With<Bullet>>,
     mut pickups: Query<(Entity, &Transform, &mut Velocity, &mut Pickup)>,
@@ -2320,6 +2414,7 @@ fn pickup_update(
             }
         }
         if collected {
+            flags.powerup_used = true; // used a powerup this run → blocks the Purist achievement
             let col = match pk.kind {
                 PickupKind::Chain => {
                     chain.unlocked = true;
@@ -3020,6 +3115,7 @@ fn reset_run(
     boss: &mut BossState,
     chain: &mut Chain,
     mass: &mut MassShot,
+    flags: &mut RunFlags,
 ) {
     run.lives = START_LIVES;
     run.respawn = 0.0;
@@ -3033,6 +3129,7 @@ fn reset_run(
     boss.fought = 0; // so the next boss wave spawns a fresh boss
     *chain = Chain::default(); // must re-earn the chain shot…
     *mass = MassShot::default(); // …and the mass shot
+    *flags = RunFlags::default(); // fresh "no powerups used" flag for Purist
     spawn_player(commands);
 }
 
@@ -3054,20 +3151,32 @@ fn menu_start(
     mut wave: ResMut<Wave>,
     mut banner: ResMut<WaveBanner>,
     mut warp: ResMut<Warp>,
-    mut progress: (ResMut<BossState>, ResMut<Chain>, ResMut<MassShot>), // bundled (16-param limit)
+    mut progress: (ResMut<BossState>, ResMut<Chain>, ResMut<MassShot>, ResMut<RunFlags>), // bundled (16-param limit)
 ) {
     if !(keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space)) {
         return;
     }
-    reset_run(&mut commands, &mut run, &mut score, &mut wave, &mut banner, &mut warp, &mut progress.0, &mut progress.1, &mut progress.2);
+    reset_run(&mut commands, &mut run, &mut score, &mut wave, &mut banner, &mut warp, &mut progress.0, &mut progress.1, &mut progress.2, &mut progress.3);
     next.set(GameState::Playing);
 }
 
-fn spawn_menu_ui(mut commands: Commands) {
+fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>) {
     let root = overlay(&mut commands, MenuUi);
+    let done = achieved.unlocked.iter().filter(|u| **u).count();
     commands.entity(root).with_children(|p| {
         p.spawn(text(74.0, ship_color(), "VIOLET EDGE"));
         p.spawn(text(24.0, Color::srgb(0.7, 0.85, 1.2), "Enter  —  Play"));
+        p.spawn(text(18.0, Color::srgb(0.6, 0.7, 1.0), &format!("ACHIEVEMENTS   {done} / {}", ACHIEVEMENTS.len())));
+        for (i, &a) in ACHIEVEMENTS.iter().enumerate() {
+            let (name, desc) = ach_meta(a);
+            // earned → bright name + description; locked → hide the (fun) name, show the goal
+            let (col, line) = if achieved.unlocked[i] {
+                (mass_color(), format!("{name}  —  {desc}"))
+            } else {
+                (Color::srgb(0.4, 0.45, 0.6), format!("???  —  {desc}"))
+            };
+            p.spawn(text(14.0, col, &line));
+        }
     });
 }
 
@@ -3076,6 +3185,118 @@ fn despawn_menu_ui(mut commands: Commands, q: Query<Entity, With<MenuUi>>) {
         commands.entity(e).despawn();
     }
 }
+
+// ─────────────────────────────── achievement runtime ──────────────────
+// The persistent top-center column that unlock toasts stack into.
+fn spawn_toast_root(mut commands: Commands) {
+    commands.spawn((
+        ToastRoot,
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(66.0),
+            left: Val::Px(0.0),
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+    ));
+}
+
+// Load lifetime progress at startup and mark already-earned achievements as unlocked (so they
+// don't re-toast on boot).
+fn load_progress(mut stats: ResMut<Stats>, mut unlocked: ResMut<Achievements>) {
+    if let Some(saved) = read_progress() {
+        *stats = saved;
+    }
+    for (i, &a) in ACHIEVEMENTS.iter().enumerate() {
+        unlocked.unlocked[i] = ach_met(a, &stats);
+    }
+}
+
+// Poll the lifetime Stats; the first frame an achievement's condition is met, flip its flag, pop a
+// toast, chime, and persist. Cheap — 7 checks a frame.
+fn achievements(
+    mut commands: Commands,
+    stats: Res<Stats>,
+    mut unlocked: ResMut<Achievements>,
+    bank: Option<Res<SfxBank>>,
+    root: Query<Entity, With<ToastRoot>>,
+) {
+    for (i, &a) in ACHIEVEMENTS.iter().enumerate() {
+        if unlocked.unlocked[i] || !ach_met(a, &stats) {
+            continue;
+        }
+        unlocked.unlocked[i] = true;
+        let (name, _) = ach_meta(a);
+        if let Some(r) = root.iter().next() {
+            commands.entity(r).with_children(|p| {
+                p.spawn((
+                    Toast { life: TOAST_LIFE },
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+                        margin: UiRect::top(Val::Px(6.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.10, 0.03, 0.18, 0.92)),
+                ))
+                .with_children(|t| {
+                    t.spawn(text(15.0, Color::srgb(0.7, 0.85, 1.2), "ACHIEVEMENT UNLOCKED"));
+                    t.spawn(text(22.0, mass_color(), name));
+                });
+            });
+        }
+        if let Some(b) = &bank {
+            one_shot(&mut commands, b.achievement.clone(), 0.6);
+        }
+        save_progress(&stats);
+    }
+}
+
+// Toasts pop for a few seconds, then vanish.
+fn toast_update(time: Res<Time>, mut commands: Commands, mut toasts: Query<(Entity, &mut Toast)>) {
+    let dt = time.delta_secs();
+    for (e, mut toast) in &mut toasts {
+        toast.life -= dt;
+        if toast.life <= 0.0 {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+// Lifetime progress persists to a tiny best-effort save file (six space-separated numbers). File
+// I/O is compiled out of tests so the suite never touches the disk.
+#[cfg(not(test))]
+const SAVE_PATH: &str = "violet-edge.save";
+#[cfg(not(test))]
+fn read_progress() -> Option<Stats> {
+    let text = std::fs::read_to_string(SAVE_PATH).ok()?;
+    let n: Vec<&str> = text.split_whitespace().collect();
+    if n.len() < 6 {
+        return None;
+    }
+    Some(Stats {
+        blue: n[0].parse().ok()?,
+        green: n[1].parse().ok()?,
+        enemies: n[2].parse().ok()?,
+        warden: n[3] == "1",
+        glutton: n[4] == "1",
+        no_powerups: n[5] == "1",
+    })
+}
+#[cfg(not(test))]
+fn save_progress(s: &Stats) {
+    let line = format!("{} {} {} {} {} {}", s.blue, s.green, s.enemies, s.warden as u8, s.glutton as u8, s.no_powerups as u8);
+    let _ = std::fs::write(SAVE_PATH, line); // best-effort — never block gameplay on I/O
+}
+#[cfg(test)]
+fn read_progress() -> Option<Stats> {
+    None
+}
+#[cfg(test)]
+fn save_progress(_s: &Stats) {}
 
 // Game-Over screen: Enter restarts immediately; Esc quits to the main menu.
 fn gameover_restart(
@@ -3087,7 +3308,7 @@ fn gameover_restart(
     mut wave: ResMut<Wave>,
     mut banner: ResMut<WaveBanner>,
     mut warp: ResMut<Warp>,
-    mut progress: (ResMut<BossState>, ResMut<Chain>, ResMut<MassShot>),
+    mut progress: (ResMut<BossState>, ResMut<Chain>, ResMut<MassShot>, ResMut<RunFlags>),
     field: Query<Entity, GameplayEntity>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
@@ -3100,7 +3321,7 @@ fn gameover_restart(
     for e in &field {
         commands.entity(e).despawn();
     }
-    reset_run(&mut commands, &mut run, &mut score, &mut wave, &mut banner, &mut warp, &mut progress.0, &mut progress.1, &mut progress.2);
+    reset_run(&mut commands, &mut run, &mut score, &mut wave, &mut banner, &mut warp, &mut progress.0, &mut progress.1, &mut progress.2, &mut progress.3);
     next.set(GameState::Playing); // field refills from the edges via top_up_asteroids
 }
 
@@ -3228,6 +3449,7 @@ struct SfxBank {
     enemy_shot: Handle<AudioSource>,
     enemy_die: Handle<AudioSource>,
     warp: Handle<AudioSource>,
+    achievement: Handle<AudioSource>,
 }
 
 fn start_sfx(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
@@ -3239,6 +3461,7 @@ fn start_sfx(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
         enemy_shot: sources.add(AudioSource { bytes: audio::enemy_shot_wav().into() }),
         enemy_die: sources.add(AudioSource { bytes: audio::enemy_die_wav().into() }),
         warp: sources.add(AudioSource { bytes: audio::warp_wav().into() }),
+        achievement: sources.add(AudioSource { bytes: audio::achievement_sfx_wav().into() }),
     });
 }
 
@@ -3349,11 +3572,16 @@ fn main() {
         .insert_resource(BossState::default())
         .insert_resource(Chain::default())
         .insert_resource(MassShot::default())
+        .insert_resource(Stats::default())
+        .insert_resource(Achievements::default())
+        .insert_resource(RunFlags::default())
         .add_event::<SoundFx>()
         .init_state::<GameState>()
-        .add_systems(Startup, (setup, spawn_hud, start_music, start_sfx))
+        .add_systems(Startup, (setup, spawn_hud, spawn_toast_root, load_progress, start_music, start_sfx))
         // always: keep the arena sized, handle pause input, refresh the HUD text
         .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update).chain())
+        // always: watch for achievement unlocks + age out toasts
+        .add_systems(Update, (achievements, toast_update))
         // render in PostUpdate so it ALWAYS runs after every Update system (incl.
         // ship_bounds) — draws final positions, no border ghosting; runs in all states
         .add_systems(PostUpdate, (render, render_boss, render_extras))
@@ -3434,6 +3662,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(MassShot::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
@@ -3457,6 +3687,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((
@@ -3479,6 +3711,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         // a dense size-2 rock = 2 hp: the first hit only cracks it
@@ -3510,6 +3744,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         // a size-2 rock with a bullet sitting on it
         app.world_mut().spawn((
@@ -3544,6 +3780,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         let a = app
             .world_mut()
             .spawn((
@@ -3574,6 +3812,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         // a rock at rest, mid-arena (elastic hits could have zeroed it → "stuck")
         let rock = app
@@ -3591,6 +3831,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default()); // ship_death needs this resource
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Dev::default());
@@ -3617,6 +3859,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default());
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Dev::default());
@@ -3643,6 +3887,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default());
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Dev::default());
@@ -3669,6 +3915,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default());
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Dev::default());
@@ -3693,6 +3941,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default()); // ship_death needs this resource
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Dev::default());
@@ -3717,6 +3967,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default());
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Dev { invincible: true }); // god-mode ON
@@ -3742,6 +3994,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default()); // ship_death needs this resource
         app.insert_resource(Run { lives: 1, respawn: 0.0 });
         app.insert_resource(Dev::default());
@@ -3767,6 +4021,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Wave { level: 1, timer: 0.0, calm: 0.0 });
         app.insert_resource(WaveBanner::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
@@ -3780,6 +4036,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((BlackHole { life: 1.0, spin: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
@@ -3800,6 +4058,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Warp { charges: WARP_MAX_CHARGES, cooldown: 0.0 });
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::ShiftLeft); // stays "just_pressed" (no clear system) → fires each frame
@@ -3825,6 +4085,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Wave { level: 1, timer: WAVE_SECS, calm: 0.0 });
         app.insert_resource(SpawnClock(0.0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
@@ -3839,6 +4101,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Wave { level: 1, timer: WAVE_SECS, calm: 5.0 }); // in the post-boss calm
         app.insert_resource(SpawnClock(0.0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
@@ -3860,6 +4124,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default());
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Score(0));
@@ -3890,6 +4156,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default());
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Score(0));
@@ -3921,6 +4189,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default());
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Score(0));
@@ -3978,6 +4248,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(Run { lives: 3, respawn: 1.0 }); // respawning → skip ship-contact
         app.insert_resource(NextState::<GameState>::default());
@@ -4007,6 +4279,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.world_mut().spawn((Devourer { hp: DEVOURER_HP, grow: 0.0, fed: 0, dying: 0.0, pulse: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
         app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
@@ -4021,6 +4295,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(Chain::default());
         app.insert_resource(MassShot::default());
@@ -4038,6 +4314,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         // a dense size-3 rock has hp 3 — a standard shot only chips it; a mass shot (power 3) breaks it
         app.world_mut().spawn((
@@ -4066,6 +4344,7 @@ mod tests {
         app.insert_resource(BossState { fought: 5 });
         app.insert_resource(Chain { unlocked: true, charges: 3, recharge: 0.0, cooldown: 0.0 });
         app.insert_resource(MassShot { unlocked: true, active: true });
+        app.insert_resource(RunFlags { powerup_used: true });
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::Enter);
         app.insert_resource(input);
@@ -4094,10 +4373,26 @@ mod tests {
     }
 
     #[test]
+    fn achievement_unlocks_when_its_condition_is_met() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(Stats { enemies: 1, ..default() }); // one enemy killed → First Blood
+        app.insert_resource(Achievements::default());
+        app.add_systems(Update, achievements);
+        app.update();
+        let first_blood = ACHIEVEMENTS.iter().position(|a| *a == Ach::FirstBlood).unwrap();
+        let true_blue = ACHIEVEMENTS.iter().position(|a| *a == Ach::TrueBlue).unwrap();
+        assert!(app.world().resource::<Achievements>().unlocked[first_blood], "First Blood unlocks after an enemy kill");
+        assert!(!app.world().resource::<Achievements>().unlocked[true_blue], "True Blue stays locked with 0 blue destroyed");
+    }
+
+    #[test]
     fn bullet_kills_enemy_in_one_shot() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.world_mut().spawn((
             Enemy { fire: 1.0, life: 5.0, strafe: 1.0, entered: true, fleeing: false },
@@ -4121,6 +4416,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default());
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Dev::default());
@@ -4147,6 +4444,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((BlackHole { life: 1.0, spin: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
@@ -4167,6 +4466,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         // entered, out of life, already past the far edge → the flee branch despawns it
         app.world_mut().spawn((
@@ -4193,6 +4494,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Wave { level: 5, timer: WAVE_SECS, calm: 0.0 });
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(BossState::default());
@@ -4217,6 +4520,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(NextState::<GameState>::default());
         app.insert_resource(Run { lives: 3, respawn: 0.0 });
         app.insert_resource(Score(0));
@@ -4243,6 +4548,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((Boss { hp: BOSS_HP, rot: 0.0, pulse: 0.0, entered: true, charge: 0.0, fire: 5.0, capture: 0.0, dying: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
         let rock = app
@@ -4259,6 +4566,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.world_mut().spawn((Boss { hp: BOSS_HP, rot: 0.0, pulse: 0.0, entered: true, charge: 0.0, fire: 5.0, capture: 5.0, dying: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
         app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
@@ -4273,6 +4582,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((Ship { angle: 0.0, cooldown: 0.0, invuln: 0.0, flame: 0.0 }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, -200.0, 0.0)));
         app.world_mut().spawn((Boss { hp: BOSS_HP, rot: 0.0, pulse: 0.0, entered: true, charge: 0.0, fire: 0.0, capture: 5.0, dying: 0.0 }, Transform::from_xyz(0.0, 200.0, 0.0)));
@@ -4298,6 +4609,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((BlackHole { life: 1.0, spin: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
@@ -4312,6 +4625,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((BlackHole { life: 1.0, spin: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
@@ -4333,6 +4648,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((BlackHole { life: 1.0, spin: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
@@ -4360,6 +4677,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((Boss { hp: BOSS_HP, rot: 0.0, pulse: 0.0, entered: true, charge: 0.0, fire: 5.0, capture: 0.0, dying: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
         // a small rock CLOSE and a large rock FAR — it should still take the large one
@@ -4382,6 +4701,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         // a held (shield) rock at the origin
         app.world_mut().spawn((
             Asteroid { size: 3, verts: vec![Vec2::X * 88.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 },
@@ -4407,6 +4728,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         let rock = app
             .world_mut()
@@ -4430,6 +4753,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.world_mut().spawn((
             Asteroid { size: 1, verts: vec![Vec2::X * 22.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 },
@@ -4448,6 +4773,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(Wave { level: 6, timer: WAVE_SECS, calm: 5.0 }); // calm window open
         app.insert_resource(Chain::default());
@@ -4466,6 +4793,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(Chain::default());
         app.insert_resource(MassShot::default());
@@ -4482,6 +4811,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(Chain::default());
         app.insert_resource(MassShot::default());
@@ -4550,6 +4881,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Chain { unlocked: true, charges: 3, recharge: CHAIN_RECHARGE, cooldown: 0.0 });
         let mut mouse = ButtonInput::<MouseButton>::default();
         mouse.press(MouseButton::Right);
@@ -4566,6 +4899,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         // a beam at the origin spread along Y (segment (0,-58)..(0,58)), a rock sitting on it
@@ -4581,6 +4916,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         // bullet + mine overlapping at the origin (bullet detonates the mine)
         app.world_mut().spawn((

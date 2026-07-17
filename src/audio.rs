@@ -490,6 +490,21 @@ pub fn warp_wav() -> Vec<u8> {
     wav_bytes(&samples, SR as u32)
 }
 
+/// Achievement unlocked: a bright rolled major arpeggio (C6-E6-G6-C7, each note entering slightly
+/// later so they ring together) — a positive, sparkly "flourish".
+pub fn achievement_sfx_wav() -> Vec<u8> {
+    render_sfx(0.7, |t, _| {
+        let voice = |f: f32, delay: f32| {
+            if t < delay {
+                return 0.0;
+            }
+            let nt = t - delay;
+            (TAU * f * nt).sin() * (1.0 - (-nt * 80.0).exp()) * (-nt * 3.5).exp()
+        };
+        (voice(1046.5, 0.0) + voice(1318.5, 0.06) + voice(1568.0, 0.12) + voice(2093.0, 0.18)) * 0.25
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +535,7 @@ mod tests {
             enemy_shot_wav(),
             enemy_die_wav(),
             warp_wav(),
+            achievement_sfx_wav(),
         ] {
             assert_eq!(&wav[0..4], b"RIFF", "sfx starts with a RIFF header");
             assert_eq!(&wav[8..12], b"WAVE", "sfx is a WAVE file");
