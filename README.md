@@ -35,6 +35,7 @@ MB in `target/`. Rebuilds after that are fast.
 | Fire | `Space` or left-click |
 | Warp (black hole) | `Shift` |
 | Chain shot | right-click *(once unlocked)* |
+| Switch standard / mass shot | `Q` *(once unlocked)* |
 | Pause | `Esc` |
 | Mute music | `M` |
 | Skip track | `N` |
@@ -50,6 +51,9 @@ MB in `target/`. Rebuilds after that are fast.
   mines and enemies (never the player), and bends the grid. Stays on-screen.
 - **Chain shot** — a beam that shears everything along its length; unlocked by a
   pickup dropped after the first boss (grab it by flying into it *or* shooting it).
+- **Mass shot** — a bigger, slower, harder-hitting primary (one-shots dense rocks,
+  chunks bosses); unlocked after the second boss. Toggle it against the fast
+  standard shot with `Q`.
 - **Boss 1** — a roaming "shield-shaman" that orbits a shield of captured rocks
   and hurls them; beaten by clearing its shield and hitting the exposed core.
 - **Procedural audio** — every sound is synthesized at runtime, no asset files:
@@ -61,7 +65,7 @@ MB in `target/`. Rebuilds after that are fast.
 
 - Wave 6–10 content arc (green → +mines → +mobs), then **loop waves 1–10**.
 - **Boss 2** (wave 10) — a red seeker that eats asteroids to grow bigger and tankier.
-- More pickups (mass shot, assist drone).
+- More pickups (assist drone).
 - Menus, and an audio-polish pass (effects chain / produced tracks).
 
 ## Notes

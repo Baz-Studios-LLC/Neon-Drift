@@ -36,6 +36,11 @@ const BULLET_SPEED: f32 = 720.0; // px/s
 const BULLET_LIFE: f32 = 1.6; // s
 const BULLET_R: f32 = 3.0;
 
+// Mass shot (pickup after boss 2): a bigger, slower, harder-hitting primary. Toggle standard↔mass.
+const MASS_COOLDOWN: f32 = 0.5; // s between mass shots (vs 0.18 standard — much slower)
+const MASS_BULLET_R: f32 = 7.0; // fat round (vs 3.0 standard)
+const MASS_POWER: i32 = 3; // damage per hit (standard = 1): 1-shots dense rocks, chunks bosses
+
 const GRID_CELL: f32 = 52.0;
 const WAVE_SECS: f32 = 180.0; // 3-minute waves — survive the timer to advance
 const POP_BASE: i32 = 5; // asteroids on screen = POP_BASE + wave...
@@ -156,6 +161,25 @@ fn flame_color() -> Color {
 } // hot purple-white exhaust
 fn bullet_color() -> Color {
     Color::srgb(2.4, 1.0, 4.6)
+}
+fn mass_color() -> Color {
+    Color::srgb(5.2, 2.4, 6.5)
+} // bright hot violet — the mass shot (player kit)
+
+// A bullet's hit radius and damage depend on whether it's a mass shot.
+fn bullet_radius(mass: bool) -> f32 {
+    if mass {
+        MASS_BULLET_R
+    } else {
+        BULLET_R
+    }
+}
+fn bullet_power(mass: bool) -> i32 {
+    if mass {
+        MASS_POWER
+    } else {
+        1
+    }
 }
 fn rock_color() -> Color {
     Color::srgb(0.3, 2.4, 5.0)
@@ -378,6 +402,7 @@ struct Asteroid {
 struct Bullet {
     life: f32,
     trail: Vec<Vec2>,
+    mass: bool, // a mass shot — bigger, harder-hitting
 }
 
 #[derive(Component)]
@@ -460,13 +485,21 @@ struct ChainShot {
     perp: Vec2,
 }
 
-// The reward orb that drifts in the calm after the first boss — fly into it to unlock
-// the chain shot, or leave it (hardcore). Only the chain kind exists so far.
+// Which weapon a reward orb unlocks. Chain drops after boss 1, mass shot after boss 2.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PickupKind {
+    Chain,
+    Mass,
+}
+
+// The reward orb that drifts in the calm after a boss — fly into it (or shoot it) to unlock the
+// weapon, or leave it (hardcore).
 #[derive(Component)]
 struct Pickup {
     rot: f32,
     pulse: f32,
     life: f32, // seconds the orb lingers before it's gone for good (outlives the boss calm)
+    kind: PickupKind,
 }
 
 // UI markers (each overlay's root; despawned on state exit — despawn is recursive).
@@ -539,6 +572,14 @@ struct Chain {
     charges: i32,
     recharge: f32, // countdown to regenerating one charge
     cooldown: f32, // min gap between shots
+}
+
+// Mass-shot state (primary-weapon upgrade). `unlocked` flips when its pickup is grabbed;
+// `active` toggles standard↔mass with Q.
+#[derive(Resource, Default)]
+struct MassShot {
+    unlocked: bool,
+    active: bool,
 }
 
 fn is_boss_wave(level: i32) -> bool {
@@ -848,21 +889,27 @@ fn fire(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    mut mass: ResMut<MassShot>,
     mut sfx: EventWriter<SoundFx>,
     mut q: Query<(&mut Ship, &Transform)>,
 ) {
     let dt = time.delta_secs();
+    // Q toggles standard↔mass once the mass shot is unlocked
+    if mass.unlocked && keys.just_pressed(KeyCode::KeyQ) {
+        mass.active = !mass.active;
+    }
+    let is_mass = mass.unlocked && mass.active;
     let want_fire = keys.pressed(KeyCode::Space) || mouse.pressed(MouseButton::Left);
     for (mut ship, t) in &mut q {
         if ship.cooldown > 0.0 {
             ship.cooldown -= dt;
         }
         if want_fire && ship.cooldown <= 0.0 {
-            ship.cooldown = FIRE_COOLDOWN;
+            ship.cooldown = if is_mass { MASS_COOLDOWN } else { FIRE_COOLDOWN };
             let dir = Vec2::from_angle(ship.angle);
             let pos = t.translation.truncate() + dir * SHIP_R;
             commands.spawn((
-                Bullet { life: BULLET_LIFE, trail: Vec::new() },
+                Bullet { life: BULLET_LIFE, trail: Vec::new(), mass: is_mass },
                 Velocity(dir * BULLET_SPEED),
                 Transform::from_xyz(pos.x, pos.y, 0.0),
             ));
@@ -1071,7 +1118,7 @@ fn bullet_bounds(
 
 fn collisions(
     mut commands: Commands,
-    bullets: Query<(Entity, &Transform), With<Bullet>>,
+    bullets: Query<(Entity, &Transform, &Bullet)>,
     mut asteroids: Query<(Entity, &Transform, &mut Asteroid), (Without<Mine>, Without<Shielded>)>,
     mines: Query<(Entity, &Transform), With<Mine>>,
     enemies: Query<(Entity, &Transform), With<Enemy>>,
@@ -1087,23 +1134,25 @@ fn collisions(
     let mut dead_m: HashSet<Entity> = HashSet::new();
     let mut dead_e: HashSet<Entity> = HashSet::new();
     let mut dead_s: HashSet<Entity> = HashSet::new();
-    for (be, bt) in &bullets {
+    for (be, bt, b) in &bullets {
         if dead_b.contains(&be) {
             continue;
         }
         let bp = bt.translation.truncate();
+        let br = bullet_radius(b.mass); // mass shots are fatter…
+        let power = bullet_power(b.mass); // …and hit harder
         for (ae, at, mut a) in &mut asteroids {
             if dead_a.contains(&ae) {
                 continue;
             }
             let ap = at.translation.truncate();
-            let rr = asteroid_radius(a.size) + BULLET_R;
+            let rr = asteroid_radius(a.size) + br;
             if bp.distance_squared(ap) < rr * rr {
                 dead_b.insert(be);
                 commands.entity(be).despawn(); // bullet is spent either way
-                if a.hp > 1 {
-                    a.hp -= 1; // dense rock cracks but holds — a chip, no split
-                    burst(&mut commands, ap, dense_color(), 6, 160.0, &mut rng);
+                a.hp -= power;
+                if a.hp > 0 {
+                    burst(&mut commands, ap, dense_color(), 6, 160.0, &mut rng); // dense rock cracks but holds
                 } else {
                     dead_a.insert(ae);
                     break_asteroid(&mut commands, &mut rng, &mut score, ae, ap, a.size, 1.0, a.dense);
@@ -1119,7 +1168,7 @@ fn collisions(
             if dead_m.contains(&me) {
                 continue;
             }
-            let rr = MINE_R + BULLET_R;
+            let rr = MINE_R + br;
             if bp.distance_squared(mt.translation.truncate()) < rr * rr {
                 dead_b.insert(be);
                 dead_m.insert(me);
@@ -1143,7 +1192,7 @@ fn collisions(
                 continue;
             }
             let ep = ent.translation.truncate();
-            let rr = ENEMY_R + BULLET_R;
+            let rr = ENEMY_R + br;
             if bp.distance_squared(ep) < rr * rr {
                 dead_b.insert(be);
                 dead_e.insert(ene);
@@ -1162,7 +1211,7 @@ fn collisions(
                 continue;
             }
             let sp = st.translation.truncate();
-            let rr = asteroid_radius(sa.size) + BULLET_R;
+            let rr = asteroid_radius(sa.size) + br;
             if bp.distance_squared(sp) < rr * rr {
                 dead_b.insert(be);
                 commands.entity(be).despawn();
@@ -1186,11 +1235,11 @@ fn collisions(
             if boss.charge > 0.0 || boss.dying > 0.0 {
                 continue; // invulnerable while charging up / already dying
             }
-            let rr = BOSS_R + BULLET_R;
+            let rr = BOSS_R + br;
             if bp.distance_squared(bpos.translation.truncate()) < rr * rr {
                 dead_b.insert(be);
                 commands.entity(be).despawn();
-                boss.hp -= 1;
+                boss.hp -= power;
                 burst(&mut commands, bp, boss_color(), 6, 180.0, &mut rng);
                 break;
             }
@@ -1203,11 +1252,11 @@ fn collisions(
             if dv.dying > 0.0 {
                 continue;
             }
-            let rr = devourer_radius(dv.grow) + BULLET_R;
+            let rr = devourer_radius(dv.grow) + br;
             if bp.distance_squared(dpos.translation.truncate()) < rr * rr {
                 dead_b.insert(be);
                 commands.entity(be).despawn();
-                dv.hp -= 1;
+                dv.hp -= power;
                 burst(&mut commands, bp, devourer_color(), 6, 180.0, &mut rng);
                 break;
             }
@@ -1802,7 +1851,7 @@ fn boss_update(
                 if content_wave(wave.level) == BOSS_WAVE_INTERVAL {
                     let dir = Vec2::from_angle(rng.gen_range(0.0..TAU));
                     commands.spawn((
-                        Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE },
+                        Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE, kind: PickupKind::Chain },
                         Velocity(dir * PICKUP_DRIFT),
                         Transform::from_xyz(0.0, 0.0, 0.0),
                     ));
@@ -1899,8 +1948,16 @@ fn devourer_update(
                 burst(&mut commands, p, devourer_color(), 60, 500.0, &mut rng);
                 burst(&mut commands, p, Color::srgb(6.0, 4.0, 4.0), 26, 320.0, &mut rng);
                 commands.entity(de).despawn();
+                // drop the mass-shot orb (the boss-2 reward, content wave 10)
+                let pdir = Vec2::from_angle(rng.gen_range(0.0..TAU));
+                commands.spawn((
+                    Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE, kind: PickupKind::Mass },
+                    Velocity(pdir * PICKUP_DRIFT),
+                    Transform::from_xyz(0.0, 0.0, 0.0),
+                ));
                 defeat_boss(&mut score, &mut wave, &mut banner);
             }
+
             continue;
         }
         if dv.hp <= 0 {
@@ -2209,6 +2266,7 @@ fn pickup_update(
     time: Res<Time>,
     arena: Res<Arena>,
     mut chain: ResMut<Chain>,
+    mut mass: ResMut<MassShot>,
     ships: Query<&Transform, With<Ship>>,
     bullets: Query<(Entity, &Transform), With<Bullet>>,
     mut pickups: Query<(Entity, &Transform, &mut Velocity, &mut Pickup)>,
@@ -2242,10 +2300,20 @@ fn pickup_update(
             }
         }
         if collected {
-            chain.unlocked = true;
-            chain.charges = CHAIN_MAX_CHARGES;
-            chain.recharge = CHAIN_RECHARGE;
-            burst(&mut commands, p, chain_color(), 30, 300.0, &mut rng);
+            let col = match pk.kind {
+                PickupKind::Chain => {
+                    chain.unlocked = true;
+                    chain.charges = CHAIN_MAX_CHARGES;
+                    chain.recharge = CHAIN_RECHARGE;
+                    chain_color()
+                }
+                PickupKind::Mass => {
+                    mass.unlocked = true;
+                    mass.active = true; // switch to it on grab; Q toggles back to the standard shot
+                    mass_color()
+                }
+            };
+            burst(&mut commands, p, col, 30, 300.0, &mut rng);
             commands.entity(pe).despawn();
         }
     }
@@ -2589,18 +2657,21 @@ fn render(
     // blobs shrink to a fine point at the tail and heat up toward the head (deep
     // purple tip → hot lavender base); the head itself is kept compact.
     let core = Color::srgb(5.0, 4.2, 5.6); // white-hot center
-    let flame_tip = dim(bullet_color(), 0.5); // deep purple (tail)
-    let flame_base = mix(bullet_color(), core, 0.35); // hot lavender (near the head)
     for (b, bt) in &bullets {
         let c = bt.translation.truncate();
+        // mass shots are fatter and read in a hotter violet than the standard flame
+        let base = if b.mass { mass_color() } else { bullet_color() };
+        let flame_tip = dim(base, 0.5); // deep (tail)
+        let flame_base = mix(base, core, 0.35); // hot (near the head)
+        let br = bullet_radius(b.mass);
         let n = b.trail.len();
         for k in 0..n {
             let f = if n > 1 { k as f32 / (n - 1) as f32 } else { 1.0 }; // 0 tail → 1 head
-            let r = BULLET_R * (0.12 + 0.85 * f); // taper to a point at the tail
+            let r = br * (0.12 + 0.85 * f); // taper to a point at the tail
             gizmos.circle_2d(Isometry2d::from_translation(b.trail[k]), r, mix(flame_tip, flame_base, f * f));
         }
-        gizmos.circle_2d(Isometry2d::from_translation(c), BULLET_R * 0.75, flame_base);
-        gizmos.circle_2d(Isometry2d::from_translation(c), BULLET_R * 0.38, core);
+        gizmos.circle_2d(Isometry2d::from_translation(c), br * 0.75, flame_base);
+        gizmos.circle_2d(Isometry2d::from_translation(c), br * 0.38, core);
     }
 
     // ship — flame + hull (blinks while invulnerable)
@@ -2823,14 +2894,18 @@ fn render_extras(
         gizmos.circle_2d(Isometry2d::from_translation(a), 4.0, white);
         gizmos.circle_2d(Isometry2d::from_translation(b), 4.0, white);
     }
-    // reward orb — a pulsing hexagon with a bright core
+    // reward orb — a pulsing hexagon with a bright core, tinted for the weapon it grants
     for (pt, pk) in &pickups {
         let c = pt.translation.truncate();
         let throb = 1.0 + 0.14 * pk.pulse.sin();
+        let col = match pk.kind {
+            PickupKind::Chain => cc,
+            PickupKind::Mass => mass_color(),
+        };
         let hex: Vec<Vec2> = (0..=6)
             .map(|i| c + Vec2::from_angle(i as f32 / 6.0 * TAU + pk.rot) * PICKUP_R * throb)
             .collect();
-        gizmos.linestrip_2d(hex, cc);
+        gizmos.linestrip_2d(hex, col);
         gizmos.circle_2d(Isometry2d::from_translation(c), PICKUP_R * 0.3 * throb, white);
     }
 }
@@ -2916,7 +2991,7 @@ fn gameover_restart(
     mut wave: ResMut<Wave>,
     mut banner: ResMut<WaveBanner>,
     mut warp: ResMut<Warp>,
-    mut progress: (ResMut<BossState>, ResMut<Chain>), // bundled (16-param limit)
+    mut progress: (ResMut<BossState>, ResMut<Chain>, ResMut<MassShot>), // bundled (16-param limit)
     ships: Query<Entity, With<Ship>>,
     asteroids: Query<Entity, With<Asteroid>>,
     bullets: Query<Entity, With<Bullet>>,
@@ -2932,6 +3007,7 @@ fn gameover_restart(
         Query<Entity, With<Boss>>,
         Query<Entity, With<ChainShot>>,
         Query<Entity, With<Pickup>>,
+        Query<Entity, With<Devourer>>,
     ),
 ) {
     if !(keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space)) {
@@ -2950,6 +3026,7 @@ fn gameover_restart(
         .chain(&hazards.3)
         .chain(&hazards.4)
         .chain(&hazards.5)
+        .chain(&hazards.6)
     {
         commands.entity(e).despawn();
     }
@@ -2961,6 +3038,7 @@ fn gameover_restart(
     wave.calm = 0.0;
     progress.0.fought = 0; // so the next boss wave spawns a fresh boss
     *progress.1 = Chain::default(); // must re-earn the chain shot
+    *progress.2 = MassShot::default(); // …and the mass shot
     banner.timer = WAVE_BANNER_SECS; // re-flash "WAVE 1"
     warp.charges = WARP_MAX_CHARGES;
     warp.cooldown = 0.0;
@@ -3212,6 +3290,7 @@ fn main() {
         .insert_resource(Dev::default())
         .insert_resource(BossState::default())
         .insert_resource(Chain::default())
+        .insert_resource(MassShot::default())
         .add_event::<SoundFx>()
         .init_state::<GameState>()
         .add_systems(Startup, (setup, spawn_hud, start_music, start_sfx))
@@ -3295,6 +3374,7 @@ mod tests {
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
         app.insert_resource(Score(0));
+        app.insert_resource(MassShot::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::Space);
@@ -3324,7 +3404,7 @@ mod tests {
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
         app.world_mut().spawn((
-            Bullet { life: 1.0, trail: Vec::new() },
+            Bullet { life: 1.0, trail: Vec::new(), mass: false },
             Velocity(Vec2::ZERO),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
@@ -3346,7 +3426,7 @@ mod tests {
             Velocity(Vec2::ZERO),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
-        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new() }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
         app.add_systems(Update, collisions);
         app.update();
         // still one rock, now at 1 hp, and nothing scored — a chip, not a break
@@ -3356,7 +3436,7 @@ mod tests {
         assert_eq!(app.world().resource::<Score>().0, 0, "a chip scores nothing");
 
         // a second bullet finishes it: it shatters into two dense chunks and scores double
-        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new() }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
         app.update();
         let chunks: Vec<bool> = app.world_mut().query::<&Asteroid>().iter(app.world()).map(|a| a.dense).collect();
         assert_eq!(chunks.len(), 2, "the second hit shatters it into two chunks");
@@ -3377,7 +3457,7 @@ mod tests {
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
         app.world_mut().spawn((
-            Bullet { life: 1.0, trail: Vec::new() },
+            Bullet { life: 1.0, trail: Vec::new(), mass: false },
             Velocity(Vec2::ZERO),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
@@ -3868,11 +3948,47 @@ mod tests {
         app.add_event::<SoundFx>();
         app.insert_resource(Score(0));
         app.world_mut().spawn((Devourer { hp: DEVOURER_HP, grow: 0.0, fed: 0, dying: 0.0, pulse: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
-        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new() }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
         app.add_systems(Update, collisions);
         app.update();
         let hp = app.world_mut().query::<&Devourer>().iter(app.world()).next().unwrap().hp;
         assert_eq!(hp, DEVOURER_HP - 1, "a bullet chips the devourer's core");
+    }
+
+    #[test]
+    fn mass_pickup_unlocks_the_mass_shot() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_event::<SoundFx>();
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        app.insert_resource(Chain::default());
+        app.insert_resource(MassShot::default());
+        app.world_mut().spawn((Ship { angle: 0.0, cooldown: 0.0, invuln: 0.0, flame: 0.0 }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE, kind: PickupKind::Mass }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.add_systems(Update, pickup_update);
+        app.update();
+        let m = app.world().resource::<MassShot>();
+        assert!(m.unlocked && m.active, "grabbing the mass orb unlocks + activates the mass shot");
+        assert!(!app.world().resource::<Chain>().unlocked, "and it does NOT unlock the chain");
+    }
+
+    #[test]
+    fn mass_shot_one_shots_a_dense_rock() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_event::<SoundFx>();
+        app.insert_resource(Score(0));
+        // a dense size-3 rock has hp 3 — a standard shot only chips it; a mass shot (power 3) breaks it
+        app.world_mut().spawn((
+            Asteroid { size: 3, verts: vec![Vec2::X * 65.0], rot: 0.0, spin: 0.0, dense: true, hp: 3 },
+            Velocity(Vec2::ZERO),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: true }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.add_systems(Update, collisions);
+        app.update();
+        let big = app.world_mut().query::<&Asteroid>().iter(app.world()).filter(|a| a.size == 3).count();
+        assert_eq!(big, 0, "a mass shot cracks a dense rock in one hit (power 3 vs hp 3)");
     }
 
     #[test]
@@ -3887,7 +4003,7 @@ mod tests {
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
         app.world_mut().spawn((
-            Bullet { life: 1.0, trail: Vec::new() },
+            Bullet { life: 1.0, trail: Vec::new(), mass: false },
             Velocity(Vec2::ZERO),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
@@ -4006,6 +4122,7 @@ mod tests {
         app.insert_resource(WaveBanner::default());
         app.insert_resource(Dev::default());
         app.insert_resource(Chain::default());
+        app.insert_resource(MassShot::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.world_mut().spawn((Boss { hp: 0, rot: 0.0, pulse: 0.0, entered: true, charge: 0.0, fire: 1.0, capture: 1.0, dying: 0.0 }, Transform::from_xyz(0.0, 200.0, 0.0)));
         app.add_systems(Update, boss_update);
@@ -4042,7 +4159,7 @@ mod tests {
         app.add_event::<SoundFx>();
         app.insert_resource(Score(0));
         app.world_mut().spawn((Boss { hp: BOSS_HP, rot: 0.0, pulse: 0.0, entered: true, charge: 0.0, fire: 5.0, capture: 5.0, dying: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
-        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new() }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
         app.add_systems(Update, collisions);
         app.update();
         let hp = app.world_mut().query::<&Boss>().iter(app.world()).next().unwrap().hp;
@@ -4198,7 +4315,7 @@ mod tests {
                 Shielded { slot: 0, grab: 1.0 },
             ))
             .id();
-        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new() }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
         app.add_systems(Update, collisions);
         app.update();
         assert_eq!(app.world().entity(rock).get::<Asteroid>().unwrap().size, 2, "a shot shield rock drops one size…");
@@ -4218,7 +4335,7 @@ mod tests {
             Transform::from_xyz(0.0, 0.0, 0.0),
             Shielded { slot: 0, grab: 1.0 },
         ));
-        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new() }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
         app.add_systems(Update, collisions);
         app.update();
         assert_eq!(app.world_mut().query::<&Asteroid>().iter(app.world()).count(), 0, "the smallest shield rock shatters when shot");
@@ -4232,8 +4349,9 @@ mod tests {
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(Wave { level: 6, timer: WAVE_SECS, calm: 5.0 }); // calm window open
         app.insert_resource(Chain::default());
+        app.insert_resource(MassShot::default());
         app.world_mut().spawn((Ship { angle: 0.0, cooldown: 0.0, invuln: 0.0, flame: 0.0 }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
-        app.world_mut().spawn((Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE, kind: PickupKind::Chain }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
         app.add_systems(Update, pickup_update);
         app.update();
         assert!(app.world().resource::<Chain>().unlocked, "flying into the orb unlocks the chain shot");
@@ -4248,8 +4366,9 @@ mod tests {
         app.add_event::<SoundFx>();
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(Chain::default());
+        app.insert_resource(MassShot::default());
         // life already elapsed → the orb leaves for good (a single, missable offer)
-        app.world_mut().spawn((Pickup { rot: 0.0, pulse: 0.0, life: 0.0 }, Velocity(Vec2::ZERO), Transform::from_xyz(200.0, 0.0, 0.0)));
+        app.world_mut().spawn((Pickup { rot: 0.0, pulse: 0.0, life: 0.0, kind: PickupKind::Chain }, Velocity(Vec2::ZERO), Transform::from_xyz(200.0, 0.0, 0.0)));
         app.add_systems(Update, pickup_update);
         app.update();
         assert_eq!(app.world_mut().query::<&Pickup>().iter(app.world()).count(), 0, "an ungrabbed orb leaves once its life elapses");
@@ -4263,9 +4382,10 @@ mod tests {
         app.add_event::<SoundFx>();
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(Chain::default());
+        app.insert_resource(MassShot::default());
         // no ship — a bullet overlapping the orb should grab it on its own
-        app.world_mut().spawn((Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
-        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new() }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE, kind: PickupKind::Chain }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
         app.add_systems(Update, pickup_update);
         app.update();
         assert!(app.world().resource::<Chain>().unlocked, "shooting the orb unlocks the chain shot");
@@ -4362,7 +4482,7 @@ mod tests {
         app.insert_resource(Score(0));
         // bullet + mine overlapping at the origin (bullet detonates the mine)
         app.world_mut().spawn((
-            Bullet { life: 1.0, trail: Vec::new() },
+            Bullet { life: 1.0, trail: Vec::new(), mass: false },
             Velocity(Vec2::ZERO),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
