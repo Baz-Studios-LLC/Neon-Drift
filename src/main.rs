@@ -145,7 +145,7 @@ const MAX_SEP: f32 = 6.0; // px/frame cap on overlap push-out
 const RESTITUTION: f32 = 1.0; // fully elastic bounce
 const MIN_DRIFT: f32 = 30.0; // px/s — rocks never fully stop (elastic hits can zero them → "stuck")
 const FRAGMENT_GRACE: f32 = 1.8; // s a freshly-broken fragment is protected from off-screen culling
-const ORANGE_BLAST_R: f32 = 74.0; // explosive-asteroid blast radius (a touch bigger than a mine's)
+const ORANGE_BLAST_R: f32 = 100.0; // explosive-asteroid blast radius — bigger than a mine's, reaches neighbours
 const ORANGE_FUSE: f32 = 0.09; // brief lit flash after a lethal hit before it detonates (a visible "pop")
 
 const RESPAWN_DELAY: f32 = 1.3; // s the ship stays gone after dying
@@ -973,11 +973,6 @@ fn spawn_gold_rock(commands: &mut Commands, half: Vec2, rng: &mut impl Rng) {
     commands.entity(e).insert(Gold);
 }
 
-// An explosive (orange) rock entering from a random edge. `big` picks a large one (mid otherwise).
-fn spawn_edge_orange(commands: &mut Commands, half: Vec2, rng: &mut impl Rng, big: bool) {
-    let e = spawn_edge_asteroid(commands, half, rng, false, big); // never dense; orange is its own thing
-    commands.entity(e).insert(Explosive);
-}
 
 // A jagged rock outline sized for `size` (regenerated when a shield rock shrinks).
 fn asteroid_verts(size: u8, rng: &mut impl Rng) -> Vec<Vec2> {
@@ -3015,12 +3010,9 @@ fn render(
         if a.dense {
             let frac = a.hp.max(1) as f32 / a.size.max(1) as f32; // full shell → shrinks to a small core
             gizmos.linestrip_2d(ring(0.35 + 0.3 * frac), col);
-        } else if explosive.is_some() {
-            // a hot central core marks it "armed" (single dot, so it isn't read as an extra chunk)
-            gizmos.circle_2d(Isometry2d::from_translation(c), asteroid_radius(a.size) * 0.22, col);
         }
-        // gold rocks get NO extra ring — a single shimmering outline like any rock, so broken gold
-        // looks the same "chunkiness" as normal debris
+        // orange + gold rocks get NO extra ring — a single outline like any rock; their pulsing
+        // colour is what sets them apart, so broken debris looks the same "chunkiness" as normal
     }
 
     // mines — crimson diamonds; blink faster once armed (the ship is near)
@@ -4342,8 +4334,13 @@ fn dev_wave_skip(keys: Res<ButtonInput<KeyCode>>, mut wave: ResMut<Wave>, mut bo
 fn dev_spawn_orange(keys: Res<ButtonInput<KeyCode>>, arena: Res<Arena>, mut commands: Commands) {
     if keys.just_pressed(KeyCode::F3) {
         let mut rng = rand::thread_rng();
-        spawn_edge_orange(&mut commands, arena.half, &mut rng, true);
-        info!("DEV spawn orange");
+        let h = arena.half;
+        // drop it MID-FIELD (not from an edge) so there are rocks around to show the blast + chain
+        let pos = Vec2::new(rng.gen_range(-h.x * 0.5..h.x * 0.5), rng.gen_range(-h.y * 0.5..h.y * 0.5));
+        let vel = Vec2::from_angle(rng.gen_range(0.0..TAU)) * 40.0;
+        let e = spawn_asteroid(&mut commands, pos, 3, vel, &mut rng, false);
+        commands.entity(e).insert(Explosive);
+        info!("DEV spawn orange (mid-field)");
     }
 }
 
