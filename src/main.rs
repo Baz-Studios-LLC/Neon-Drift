@@ -16,7 +16,11 @@
 use bevy::audio::{AudioSinkPlayback, PlaybackMode, Volume};
 use bevy::core_pipeline::bloom::Bloom;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::prelude::*;
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::window::PrimaryWindow;
+use bevy::winit::WinitWindows;
 
 mod audio;
 use rand::Rng;
@@ -3497,6 +3501,51 @@ fn install_menu_font(app: &mut App) {
     app.insert_resource(MenuFont(handle));
 }
 
+// The logo (purple spear), embedded so the exe stays self-contained.
+const LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
+
+#[derive(Resource)]
+struct LogoImage(Handle<Image>);
+
+// Decode the embedded logo. Keeps the CPU copy (RenderAssetUsages::default) so the window-icon
+// system can read its RGBA bytes.
+fn decode_logo() -> Image {
+    Image::from_buffer(
+        LOGO_PNG,
+        ImageType::Extension("png"),
+        CompressedImageFormats::NONE,
+        true, // colour image (sRGB)
+        ImageSampler::Default,
+        RenderAssetUsages::default(),
+    )
+    .expect("assets/logo.png is a valid PNG")
+}
+
+// Install the menu-masthead logo at BUILD time (like the font) so the initial OnEnter(Menu) can use it.
+fn install_logo(app: &mut App) {
+    let handle = app.world_mut().resource_mut::<Assets<Image>>().add(decode_logo());
+    app.insert_resource(LogoImage(handle));
+}
+
+// Set the window / taskbar icon from the same logo. Startup system — the primary window exists by
+// then on desktop. `NonSend` because winit's window handle isn't `Send`.
+fn set_window_icon(windows: NonSend<WinitWindows>, primary: Query<Entity, With<PrimaryWindow>>) {
+    let Ok(entity) = primary.single() else {
+        return;
+    };
+    let Some(win) = windows.get_window(entity) else {
+        return;
+    };
+    let img = decode_logo();
+    let (w, h) = (img.width(), img.height());
+    let Some(rgba) = img.data else {
+        return;
+    };
+    if let Ok(icon) = winit::window::Icon::from_rgba(rgba, w, h) {
+        win.set_window_icon(Some(icon));
+    }
+}
+
 // Like `text`, but in the menu (Orbitron) font.
 fn text_f(font: &Handle<Font>, font_size: f32, color: Color, s: &str) -> (Text, TextFont, TextColor) {
     (Text::new(s), TextFont { font: font.clone(), font_size, ..default() }, TextColor(color))
@@ -3680,7 +3729,7 @@ fn spawn_frame(commands: &mut Commands, marker: impl Component) {
     ));
 }
 
-fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>, intro: Res<TitleIntroPlayed>, hs: Res<HighScores>, font: Res<MenuFont>) {
+fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>, intro: Res<TitleIntroPlayed>, hs: Res<HighScores>, logo: Res<LogoImage>, font: Res<MenuFont>) {
     spawn_frame(&mut commands, MenuUi); // behind the content (spawned first)
     let root = overlay(&mut commands, MenuUi, 0.25); // light — let the starfield show through
     let done = achieved.unlocked.iter().filter(|u| **u).count();
@@ -3689,6 +3738,8 @@ fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>, intro: Res
     let title_age = if intro.0 { NEON_WARMUP } else { 0.0 };
     let best = hs.top[0];
     commands.entity(root).with_children(|p| {
+        // logo masthead above the wordmark
+        p.spawn((ImageNode::new(logo.0.clone()), Node { width: Val::Px(180.0), height: Val::Px(180.0), margin: UiRect::bottom(Val::Px(-18.0)), ..default() }));
         p.spawn((MenuTitle { age: title_age }, text_f(f, 82.0, title_color(), "VIOLET EDGE")));
         menu_button(p, f, MenuAction::Play, "PLAY");
         menu_button(p, f, MenuAction::Controls, "CONTROLS");
@@ -4426,7 +4477,7 @@ fn main() {
         .add_event::<SoundFx>()
         .add_event::<MenuClick>()
         .init_state::<GameState>()
-        .add_systems(Startup, (setup, spawn_hud, spawn_toast_root, load_progress, load_high_scores, start_music, start_sfx))
+        .add_systems(Startup, (setup, spawn_hud, spawn_toast_root, load_progress, load_high_scores, start_music, start_sfx, set_window_icon))
         // always: keep the arena sized, handle pause input, refresh the HUD text
         .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update).chain())
         // always: watch for achievement unlocks + age out toasts + hide the HUD off-run + menu buttons
@@ -4515,6 +4566,7 @@ fn main() {
     #[cfg(debug_assertions)]
     app.add_systems(Update, (dev_toggle, dev_wave_skip, dev_spawn_orange));
     install_menu_font(&mut app); // must exist before the initial OnEnter(Menu)
+    install_logo(&mut app); // ditto — the menu masthead needs the LogoImage at first OnEnter(Menu)
     app.run();
 }
 
