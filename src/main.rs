@@ -3570,9 +3570,7 @@ fn spawn_briefing_ui(mut commands: Commands, font: Res<MenuFont>) {
         p.spawn((text_f(f, 22.0, title_color(), "OBJECTIVE"), Node { margin: UiRect::top(Val::Px(14.0)), ..default() }));
         for line in [
             "Survive each wave's timer to advance.",
-            "Every 5th wave is a boss — each weaponizes the rocks.",
-            "Beat a boss to earn a new weapon.",
-            "Clear the arc — then try it again with no powerups.",
+            "See how far into the run you can push.",
         ] {
             p.spawn(text_f(f, 16.0, obj, line));
         }
