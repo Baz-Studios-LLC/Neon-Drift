@@ -549,7 +549,11 @@ enum MenuAction {
 #[derive(Component)]
 struct MenuButton(MenuAction);
 #[derive(Component)]
-struct MenuTitle; // menu/achievements title — slowly pulses (see menu_pulse)
+struct MenuTitle {
+    age: f32, // seconds since spawn — drives the neon flicker-on then a steady breathe
+}
+#[derive(Component)]
+struct MenuFrame; // the neon border frame — pulses with the title
 #[derive(Event)]
 struct MenuClick(MenuAction); // fired on click; menu_start / achievements_back consume it
 #[derive(Component)]
@@ -3239,21 +3243,42 @@ fn menu_button(p: &mut ChildSpawnerCommands, action: MenuAction, label: &str) {
     });
 }
 
+// A glowing violet border framing the screen (behind the content, so it never eats clicks).
+// `MenuFrame` lets `menu_title_fx` pulse it in sync with the title.
+fn spawn_frame(commands: &mut Commands, marker: impl Component) {
+    commands.spawn((
+        marker,
+        MenuFrame,
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(24.0),
+            left: Val::Px(24.0),
+            right: Val::Px(24.0),
+            bottom: Val::Px(24.0),
+            border: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        BorderColor(Color::srgb(0.5, 0.25, 0.9)),
+        BorderRadius::all(Val::Px(16.0)),
+    ));
+}
+
 fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>) {
+    spawn_frame(&mut commands, MenuUi); // behind the content (spawned first)
     let root = overlay(&mut commands, MenuUi, 0.25); // light — let the starfield show through
     let done = achieved.unlocked.iter().filter(|u| **u).count();
     commands.entity(root).with_children(|p| {
-        p.spawn((MenuTitle, text(78.0, title_color(), "VIOLET EDGE")));
-        p.spawn((Node { margin: UiRect::bottom(Val::Px(18.0)), ..default() }, text(15.0, Color::srgb(0.5, 0.55, 0.72), "A NEON ASTEROIDS LOVE LETTER")));
+        p.spawn((MenuTitle { age: 0.0 }, text(78.0, title_color(), "VIOLET EDGE")));
         menu_button(p, MenuAction::Play, "Play");
         menu_button(p, MenuAction::Achievements, &format!("Achievements  ({done} / {})", ACHIEVEMENTS.len()));
     });
 }
 
 fn spawn_achievements_ui(mut commands: Commands, achieved: Res<Achievements>) {
+    spawn_frame(&mut commands, AchievementsUi);
     let root = overlay(&mut commands, AchievementsUi, 0.5);
     commands.entity(root).with_children(|p| {
-        p.spawn((MenuTitle, text(46.0, title_color(), "ACHIEVEMENTS")));
+        p.spawn((MenuTitle { age: 0.0 }, text(46.0, title_color(), "ACHIEVEMENTS")));
         // two-column table: name | description (aligns cleanly, no separator glyph)
         for (i, &a) in ACHIEVEMENTS.iter().enumerate() {
             let (name, desc) = ach_meta(a);
@@ -3353,12 +3378,36 @@ fn button_click(mut clicks: EventWriter<MenuClick>, q: Query<(&Interaction, &Men
     }
 }
 
-// Slowly breathe the menu/achievements title between two violet shades — a subtle living glow.
-fn menu_pulse(time: Res<Time>, mut q: Query<&mut TextColor, With<MenuTitle>>) {
-    let p = 0.5 + 0.5 * (time.elapsed_secs() * 1.5).sin();
-    let col = mix(Color::srgb(0.5, 0.15, 0.92), Color::srgb(0.78, 0.42, 1.0), p);
-    for mut tc in &mut q {
-        *tc = TextColor(col);
+const NEON_WARMUP: f32 = 1.5; // seconds the title spends flickering on like a neon sign
+
+// Neon flicker-on for the title (erratic blinks that settle into a steady breathe), and a matching
+// pulse on the frame border. `dim` scales the (≤1) UI colours, so b<1 reads as the sign "off".
+fn menu_title_fx(time: Res<Time>, mut titles: Query<(&mut MenuTitle, &mut TextColor)>, mut frames: Query<&mut BorderColor, With<MenuFrame>>) {
+    let dt = time.delta_secs();
+    let base = Color::srgb(0.72, 0.28, 1.0);
+    let mut brightness = 0.9;
+    for (mut title, mut tc) in &mut titles {
+        title.age += dt;
+        let a = title.age;
+        let b = if a < NEON_WARMUP {
+            // two detuned sines → an erratic blink; the threshold drops as it settles → flickers ON
+            let settle = a / NEON_WARMUP;
+            let n = (a * 33.0).sin() * 0.5 + (a * 51.0).sin() * 0.5;
+            if n.abs() > (0.55 - 0.5 * settle) {
+                1.0
+            } else {
+                0.08
+            }
+        } else {
+            0.78 + 0.22 * (a * 1.6).sin() // settled breathe
+        };
+        brightness = b;
+        *tc = TextColor(dim(base, b));
+    }
+    // frame border tracks the same brightness (uses the last title's value — there's only one)
+    let fbase = Color::srgb(0.5, 0.25, 0.9);
+    for mut bc in &mut frames {
+        *bc = BorderColor(dim(fbase, brightness.max(0.2)));
     }
 }
 
@@ -3764,7 +3813,7 @@ fn main() {
         // always: keep the arena sized, handle pause input, refresh the HUD text
         .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update).chain())
         // always: watch for achievement unlocks + age out toasts + hide the HUD off-run + menu buttons
-        .add_systems(Update, (achievements, toast_update, hud_visibility, button_shimmer, button_click, menu_pulse))
+        .add_systems(Update, (achievements, toast_update, hud_visibility, button_shimmer, button_click, menu_title_fx))
         // render in PostUpdate so it ALWAYS runs after every Update system (incl.
         // ship_bounds) — draws final positions, no border ghosting; runs in all states
         .add_systems(PostUpdate, (render, render_boss, render_extras))
