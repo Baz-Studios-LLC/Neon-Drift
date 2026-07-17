@@ -150,7 +150,7 @@ const SPAWN_INVULN: f32 = 2.0; // s of blink-invulnerability on (re)spawn
 const TRAIL_LEN: usize = 10; // bullet trail points kept
 const STAR_COUNT: usize = 90;
 const START_LIVES: i32 = 3;
-const LIFE_CAP: i32 = 5; // lives never exceed this — a cleared gold rock can't let them snowball
+const LIFE_CAP: i32 = START_LIVES; // gold restores a LOST life only — never above the starting count
 // The gold 1UP rock drifts in at a randomized time during play (a countdown), not at wave starts.
 const GOLD_INITIAL_DELAY: f32 = 45.0; // grace before the first gold rock can appear in a run
 // Gap measured from when a gold rock APPEARS to the earliest the next one may — long enough that you
@@ -4528,11 +4528,11 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.insert_resource(GoldRush { active: true, forfeited: false, cooldown: 0.0 });
-        app.insert_resource(Run { lives: 3, respawn: 0.0 });
+        app.insert_resource(Run { lives: 1, respawn: 0.0 }); // below the cap, so a life can be restored
         // no Gold entities remain → the player cleared the whole lineage
         app.add_systems(Update, gold_rush_update);
         app.update();
-        assert_eq!(app.world().resource::<Run>().lives, 4, "clearing the whole gold lineage grants +1 life");
+        assert_eq!(app.world().resource::<Run>().lives, 2, "clearing the whole gold lineage restores +1 life");
         assert!(!app.world().resource::<GoldRush>().active, "the hunt resets after granting (grants once)");
     }
 
@@ -4541,10 +4541,10 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.insert_resource(GoldRush { active: true, forfeited: true, cooldown: 0.0 }); // a piece escaped off-screen
-        app.insert_resource(Run { lives: 3, respawn: 0.0 });
+        app.insert_resource(Run { lives: 1, respawn: 0.0 }); // below the cap, so only the forfeit blocks the life
         app.add_systems(Update, gold_rush_update);
         app.update();
-        assert_eq!(app.world().resource::<Run>().lives, 3, "a forfeited hunt grants nothing");
+        assert_eq!(app.world().resource::<Run>().lives, 1, "a forfeited hunt grants nothing");
         assert!(!app.world().resource::<GoldRush>().active, "the hunt still resets so a new gold rock can appear");
     }
 

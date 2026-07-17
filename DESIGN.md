@@ -107,7 +107,8 @@ recoverable, but only by earning them, via a rare gold asteroid. ✅ Implemented
   even if you clear the rest. The [fragment grace window](#) still protects freshly-broken pieces, so
   a gold rock shattered at the edge isn't instantly lost — but once a piece genuinely drifts out, the
   reward is gone. (This is the "adds urgency" resolution of the old open question.)
-- Capped at `LIFE_CAP` (5) so lives never snowball. Purist-safe: a life isn't a powerup.
+- Capped at `LIFE_CAP` (= `START_LIVES`, 3): a gold rock only restores a *lost* life, never above the
+  starting count. Purist-safe: a life isn't a powerup.
 - **Telegraph:** the rock shimmers gold with an inner ring; clearing it pops an "EXTRA LIFE" toast +
   a distinct 1UP jingle (`life_sfx_wav`, separate from the achievement chime).
 - **Only player shots break it.** Mine blasts spare gold rocks, and a drifting mine bounces off one
