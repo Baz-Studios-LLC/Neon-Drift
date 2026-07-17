@@ -51,8 +51,8 @@ const SPAWN_INTERVAL: f32 = 1.6; // seconds between streamed-in replacement rock
 
 const WARP_MAX_CHARGES: i32 = 3; // fire all 3, THEN the long cooldown refills them together
 const WARP_COOLDOWN: f32 = 35.0; // long refill once all charges are spent — not spammable
-const WARP_MISSILE_SPEED: f32 = 430.0;
-const WARP_MISSILE_LIFE: f32 = 1.3; // flies farther before tearing open the hole
+const WARP_MISSILE_SPEED: f32 = 550.0;
+const WARP_MISSILE_LIFE: f32 = 3.0; // long enough to cross the whole arena — it flies until it nears the wall it's heading for (so a shot from a corner reaches the far side, not just mid-arena)
 const WARP_HOLE_LIFE: f32 = 2.6;
 const WARP_PULL_RADIUS: f32 = 500.0; // a bit bigger than the old 440 (JS 360 read too small
 // with our longer missile throw); still well short of arena-spanning (~755 was too far)
@@ -1927,16 +1927,19 @@ fn warp_missile_update(
     mut commands: Commands,
     time: Res<Time>,
     arena: Res<Arena>,
-    mut q: Query<(Entity, &Transform, &mut WarpMissile)>,
+    mut q: Query<(Entity, &Transform, &Velocity, &mut WarpMissile)>,
 ) {
     let dt = time.delta_secs();
     let h = arena.half;
     let margin = WARP_CONSUME_R; // keep the whole event horizon inside the arena
-    for (e, t, mut m) in &mut q {
+    for (e, t, v, mut m) in &mut q {
         m.life -= dt;
         let p = t.translation.truncate();
-        let at_edge = p.x.abs() > h.x - margin || p.y.abs() > h.y - margin;
-        if m.life <= 0.0 || at_edge {
+        // detonate only at the wall it's HEADING TOWARD — so a shot launched from near an edge flies
+        // inward instead of popping at the launch edge, and it reaches the far side before opening.
+        let into_x = (p.x > h.x - margin && v.0.x > 0.0) || (p.x < -h.x + margin && v.0.x < 0.0);
+        let into_y = (p.y > h.y - margin && v.0.y > 0.0) || (p.y < -h.y + margin && v.0.y < 0.0);
+        if m.life <= 0.0 || into_x || into_y {
             let c = Vec2::new(p.x.clamp(-h.x + margin, h.x - margin), p.y.clamp(-h.y + margin, h.y - margin));
             commands.entity(e).despawn();
             commands.spawn((BlackHole { life: WARP_HOLE_LIFE, spin: 0.0 }, Transform::from_xyz(c.x, c.y, 0.0)));
@@ -5268,6 +5271,40 @@ mod tests {
         let n = app.world_mut().query::<&Asteroid>().iter(app.world()).count();
         assert_eq!(n, 0, "an asteroid within the consume radius should be eaten");
         assert_eq!(app.world().resource::<Score>().0, WARP_ROCK_SCORE, "a warp-consumed rock scores the low flat value");
+    }
+
+    #[test]
+    fn warp_fired_inward_from_an_edge_keeps_flying() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        // launched from just inside the RIGHT edge, heading INWARD (left) — must NOT pop at the launch edge
+        app.world_mut().spawn((
+            WarpMissile { life: WARP_MISSILE_LIFE },
+            Velocity(Vec2::new(-WARP_MISSILE_SPEED, 0.0)),
+            Transform::from_xyz(600.0, 0.0, 0.0), // within WARP_CONSUME_R of the right edge
+        ));
+        app.add_systems(Update, warp_missile_update);
+        app.update();
+        assert_eq!(app.world_mut().query::<&WarpMissile>().iter(app.world()).count(), 1, "a warp fired inward from an edge keeps flying");
+        assert_eq!(app.world_mut().query::<&BlackHole>().iter(app.world()).count(), 0, "no hole opens at the launch edge");
+    }
+
+    #[test]
+    fn warp_detonates_at_the_wall_it_heads_toward() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        // near the right edge, heading TOWARD it → opens the hole there
+        app.world_mut().spawn((
+            WarpMissile { life: WARP_MISSILE_LIFE },
+            Velocity(Vec2::new(WARP_MISSILE_SPEED, 0.0)),
+            Transform::from_xyz(600.0, 0.0, 0.0),
+        ));
+        app.add_systems(Update, warp_missile_update);
+        app.update();
+        assert_eq!(app.world_mut().query::<&WarpMissile>().iter(app.world()).count(), 0, "the missile is consumed");
+        assert_eq!(app.world_mut().query::<&BlackHole>().iter(app.world()).count(), 1, "it opens a hole at the wall it's heading for");
     }
 
     #[test]
