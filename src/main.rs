@@ -152,9 +152,11 @@ const STAR_COUNT: usize = 90;
 const START_LIVES: i32 = 3;
 const LIFE_CAP: i32 = 5; // lives never exceed this — a cleared gold rock can't let them snowball
 // The gold 1UP rock drifts in at a randomized time during play (a countdown), not at wave starts.
-const GOLD_INITIAL_DELAY: f32 = 30.0; // grace before the first gold rock can appear in a run
-const GOLD_MIN_GAP: f32 = 45.0; // shortest wait after one hunt ends before the next can spawn
-const GOLD_MAX_GAP: f32 = 120.0; // longest such wait (a fresh random gap is rolled each time)
+const GOLD_INITIAL_DELAY: f32 = 45.0; // grace before the first gold rock can appear in a run
+// Gap measured from when a gold rock APPEARS to the earliest the next one may — long enough that you
+// get at most ~1 per (3-minute) wave. A fresh random value in this range is rolled on each spawn.
+const GOLD_MIN_GAP: f32 = 240.0; // ~4 minutes minimum between appearances
+const GOLD_MAX_GAP: f32 = 360.0; // ~6 minutes at the outside
 const WAVE_BANNER_SECS: f32 = 2.4; // how long the big "WAVE n" flash lingers
 const WAVE_BANNER_FADE: f32 = 1.2; // of that, the trailing fade-out duration
 
@@ -1550,17 +1552,15 @@ fn wave_timer(
 // may appear on any wave (boss waves included — the Devourer won't eat it and a rock the Warden grabs
 // is just a shoot-it-off-the-shield target).
 fn gold_spawn(time: Res<Time>, wave: Res<Wave>, arena: Res<Arena>, mut rush: ResMut<GoldRush>, mut commands: Commands) {
-    if rush.active {
-        return; // a hunt is in progress — freeze the countdown (one gold lineage at a time)
-    }
-    rush.cooldown -= time.delta_secs();
-    if rush.cooldown > 0.0 || wave.calm > 0.0 {
-        return; // still cooling down, or the post-boss field is being kept clear for the reward
+    rush.cooldown -= time.delta_secs(); // counts down from the last APPEARANCE (keeps ticking during a hunt)
+    if rush.active || rush.cooldown > 0.0 || wave.calm > 0.0 {
+        return; // a hunt's still running, the gap hasn't elapsed, or the post-boss field is kept clear
     }
     let mut rng = rand::thread_rng();
     spawn_gold_rock(&mut commands, arena.half, &mut rng);
     rush.active = true;
     rush.forfeited = false;
+    rush.cooldown = rng.gen_range(GOLD_MIN_GAP..GOLD_MAX_GAP); // next one is at least ~4 min out
 }
 
 // Stream replacement rocks in gradually so the field stays populated as you clear
@@ -3854,8 +3854,8 @@ fn gold_rush_update(
     }
     rush.active = false;
     rush.forfeited = false;
-    // re-arm the countdown to a fresh random gap so the next gold rock isn't back-to-back
-    rush.cooldown = rand::thread_rng().gen_range(GOLD_MIN_GAP..GOLD_MAX_GAP);
+    // note: the cooldown to the next gold is armed at SPAWN time (in gold_spawn), measured from when
+    // the rock appeared — so a slow hunt eats into the wait rather than adding to it.
 }
 
 // Lifetime progress persists to a tiny best-effort save file (six space-separated numbers). File
@@ -4534,7 +4534,6 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<Run>().lives, 4, "clearing the whole gold lineage grants +1 life");
         assert!(!app.world().resource::<GoldRush>().active, "the hunt resets after granting (grants once)");
-        assert!(app.world().resource::<GoldRush>().cooldown >= GOLD_MIN_GAP, "a fresh cooldown is armed so the next gold isn't back-to-back");
     }
 
     #[test]
@@ -4609,7 +4608,9 @@ mod tests {
         app.add_systems(Update, gold_spawn);
         app.update();
         assert_eq!(app.world_mut().query_filtered::<(), With<Gold>>().iter(app.world()).count(), 1, "the countdown elapsing spawns exactly one gold rock");
-        assert!(app.world().resource::<GoldRush>().active, "spawning starts the hunt");
+        let rush = app.world().resource::<GoldRush>();
+        assert!(rush.active, "spawning starts the hunt");
+        assert!(rush.cooldown >= GOLD_MIN_GAP, "a long gap to the next gold is armed at spawn (no back-to-back)");
     }
 
     #[test]

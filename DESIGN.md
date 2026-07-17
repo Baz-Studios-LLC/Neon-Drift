@@ -97,9 +97,10 @@ recoverable, but only by earning them, via a rare gold asteroid. ✅ Implemented
 
 - A gold rock **drifts in at a randomized time during play** (a countdown, not tied to wave starts) —
   a distinct shimmering gold large rock that otherwise behaves normally (splits when shot). One hunt
-  at a time; after each hunt ends a fresh random cooldown (`GOLD_MIN_GAP`..`GOLD_MAX_GAP`) is armed so
-  they never spawn back-to-back, and `GOLD_INITIAL_DELAY` gives a grace at the start of a run. Any
-  wave, boss waves included (the Devourer won't eat it; a rock the Warden grabs is just shot off its shield).
+  at a time; a long random gap measured from when it *appears* (`GOLD_MIN_GAP`..`GOLD_MAX_GAP`, ~4-6
+  min) is armed on each spawn, so at most ~1 appears per (3-min) wave and never back-to-back.
+  `GOLD_INITIAL_DELAY` graces the run start. Any wave, boss waves included (the Devourer won't eat it;
+  a rock the Warden grabs is just shot off its shield).
 - You must **destroy the whole gold lineage** — the rock *and* every gold fragment (gold-ness is
   inherited through every break: bullet, chain, mine) — to claim **+1 life**. `GoldRush` tracks it.
 - **Escape = forfeit.** A gold piece culled off-screen latches `forfeited`; the life is then denied
