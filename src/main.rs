@@ -380,6 +380,8 @@ enum GameState {
     #[default]
     Menu,
     Achievements, // the achievements screen, reached from the main menu
+    Controls,     // the controls reference, reached from the main menu
+    Briefing,     // the lore + objectives screen, reached from the main menu
     Playing,
     Paused,
     GameOver,
@@ -529,6 +531,12 @@ struct GoldRush {
     forfeited: bool,
 }
 
+// Gate so the click/keypress that STARTS or RESUMES a run doesn't also fire a shot on the first
+// frame. Disarmed on entering Playing; `fire` re-arms it once the fire button is released, so you
+// must press fresh to shoot. Avoids the "click PLAY → instant bullet" bleed-through.
+#[derive(Resource, Default)]
+struct FireArmed(bool);
+
 // A chain-shot beam: travels along `Velocity`; the damaging lightning spans `perp`·±half.
 #[derive(Component)]
 struct ChainShot {
@@ -563,6 +571,10 @@ struct MenuUi;
 #[derive(Component)]
 struct AchievementsUi;
 #[derive(Component)]
+struct ControlsUi;
+#[derive(Component)]
+struct BriefingUi;
+#[derive(Component)]
 struct Hud; // HUD roots — hidden on the menu screens
 
 // Clickable menu buttons (mouse), mirrored by the keyboard shortcuts.
@@ -570,7 +582,11 @@ struct Hud; // HUD roots — hidden on the menu screens
 enum MenuAction {
     Play,
     Achievements,
-    Back,
+    Controls,
+    Briefing,
+    Back,   // return to the main menu from a sub-screen
+    Resume, // pause menu → back to the game
+    Quit,   // pause menu → abandon the run to the main menu
 }
 #[derive(Component)]
 struct MenuButton(MenuAction);
@@ -581,7 +597,7 @@ struct MenuTitle {
 #[derive(Component)]
 struct MenuFrame; // the neon border frame — pulses with the title
 #[derive(Event)]
-struct MenuClick(MenuAction); // fired on click; menu_start / achievements_back consume it
+struct MenuClick(MenuAction); // fired on click; menu_start / submenu_back / pause_toggle consume it
 #[derive(Component)]
 struct WaveText; // top-center "WAVE n  M:SS"
 #[derive(Component)]
@@ -873,6 +889,12 @@ fn spawn_player(commands: &mut Commands) {
     ));
 }
 
+// On entering Playing (start, restart, OR resume-from-pause), disarm the gun so the click/keypress
+// that got us here doesn't leak into an instant shot. `fire` re-arms on the first release.
+fn disarm_fire(mut armed: ResMut<FireArmed>) {
+    armed.0 = false;
+}
+
 // Should a rock spawned for `level` be the tanky green variant? From wave 6 on, half
 // the edge spawns come in dense (single roll, shared by every edge-spawn caller).
 fn roll_dense(level: i32, rng: &mut impl Rng) -> bool {
@@ -1063,6 +1085,7 @@ fn fire(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut mass: ResMut<MassShot>,
+    mut armed: ResMut<FireArmed>,
     mut sfx: EventWriter<SoundFx>,
     mut q: Query<(&mut Ship, &Transform)>,
 ) {
@@ -1073,11 +1096,14 @@ fn fire(
     }
     let is_mass = mass.unlocked && mass.active;
     let want_fire = keys.pressed(KeyCode::Space) || mouse.pressed(MouseButton::Left);
+    if !want_fire {
+        armed.0 = true; // released → the next press is a genuine fire, not the start/resume click
+    }
     for (mut ship, t) in &mut q {
         if ship.cooldown > 0.0 {
             ship.cooldown -= dt;
         }
-        if want_fire && ship.cooldown <= 0.0 {
+        if want_fire && armed.0 && ship.cooldown <= 0.0 {
             ship.cooldown = if is_mass { MASS_COOLDOWN } else { FIRE_COOLDOWN };
             let dir = Vec2::from_angle(ship.angle);
             let pos = t.translation.truncate() + dir * SHIP_R;
@@ -3195,7 +3221,9 @@ fn pause_toggle(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<State<GameState>>,
     mut next: ResMut<NextState<GameState>>,
+    mut clicks: EventReader<MenuClick>,
 ) {
+    let actions: Vec<MenuAction> = clicks.read().map(|c| c.0).collect();
     match state.get() {
         GameState::Playing => {
             if keys.just_pressed(KeyCode::Escape) {
@@ -3203,13 +3231,14 @@ fn pause_toggle(
             }
         }
         GameState::Paused => {
-            if keys.just_pressed(KeyCode::Escape) {
+            // Esc / Q keep working alongside the RESUME / QUIT buttons
+            if keys.just_pressed(KeyCode::Escape) || actions.contains(&MenuAction::Resume) {
                 next.set(GameState::Playing); // resume
-            } else if keys.just_pressed(KeyCode::KeyQ) {
+            } else if keys.just_pressed(KeyCode::KeyQ) || actions.contains(&MenuAction::Quit) {
                 next.set(GameState::Menu); // quit the run → OnEnter(Menu) wipes the field
             }
         }
-        GameState::Menu | GameState::Achievements | GameState::GameOver => {}
+        GameState::Menu | GameState::Achievements | GameState::Controls | GameState::Briefing | GameState::GameOver => {}
     }
 }
 
@@ -3264,8 +3293,8 @@ fn spawn_pause_ui(mut commands: Commands, font: Res<MenuFont>) {
     let f = &font.0;
     commands.entity(root).with_children(|p| {
         p.spawn(text_f(f, 54.0, title_color(), "PAUSED"));
-        p.spawn(text_f(f, 20.0, Color::srgb(0.7, 0.85, 1.2), "Resume  (Esc)"));
-        p.spawn(text_f(f, 20.0, Color::srgb(0.7, 0.85, 1.2), "Quit to Menu  (Q)"));
+        menu_button(p, f, MenuAction::Resume, "RESUME  (Esc)");
+        menu_button(p, f, MenuAction::Quit, "QUIT TO MENU  (Q)");
     });
 }
 
@@ -3346,9 +3375,17 @@ fn menu_start(
     mut clicks: EventReader<MenuClick>,
 ) {
     let actions: Vec<MenuAction> = clicks.read().map(|c| c.0).collect(); // read once, then test
-    // Achievements: `A` key or the button
+    // sub-screens: their button, or a keyboard shortcut
     if keys.just_pressed(KeyCode::KeyA) || actions.contains(&MenuAction::Achievements) {
         next.set(GameState::Achievements);
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyC) || actions.contains(&MenuAction::Controls) {
+        next.set(GameState::Controls);
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyB) || actions.contains(&MenuAction::Briefing) {
+        next.set(GameState::Briefing);
         return;
     }
     // Play: Enter/Space or the button
@@ -3420,7 +3457,26 @@ fn spawn_menu_ui(mut commands: Commands, achieved: Res<Achievements>, font: Res<
     commands.entity(root).with_children(|p| {
         p.spawn((MenuTitle { age: 0.0 }, text_f(f, 82.0, title_color(), "VIOLET EDGE")));
         menu_button(p, f, MenuAction::Play, "PLAY");
+        menu_button(p, f, MenuAction::Controls, "CONTROLS");
+        menu_button(p, f, MenuAction::Briefing, "BRIEFING");
         menu_button(p, f, MenuAction::Achievements, &format!("ACHIEVEMENTS  ({done} / {})", ACHIEVEMENTS.len()));
+    });
+}
+
+// One row of a two-column reference table (left label | right text). Shared by the achievements and
+// controls screens so they align identically and there's a single place to tune the layout.
+fn table_row(p: &mut ChildSpawnerCommands, font: &Handle<Font>, left: &str, left_col: Color, left_w: f32, right: &str, right_col: Color) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(28.0),
+        width: Val::Px(760.0),
+        padding: UiRect::vertical(Val::Px(3.0)),
+        ..default()
+    })
+    .with_children(|row| {
+        row.spawn((text_f(font, 17.0, left_col, left), Node { width: Val::Px(left_w), ..default() }));
+        row.spawn(text_f(font, 15.0, right_col, right));
     });
 }
 
@@ -3433,27 +3489,78 @@ fn spawn_achievements_ui(mut commands: Commands, achieved: Res<Achievements>, fo
         // two-column table: name | description (aligns cleanly, no separator glyph)
         for (i, &a) in ACHIEVEMENTS.iter().enumerate() {
             let (name, desc) = ach_meta(a);
-            let earned = achieved.unlocked[i];
-            let (namecol, desccol) = if earned {
+            let (namecol, desccol) = if achieved.unlocked[i] {
                 (ach_earned_color(), Color::srgb(0.78, 0.82, 0.95))
             } else {
                 (Color::srgb(0.5, 0.52, 0.62), Color::srgb(0.38, 0.4, 0.5))
             };
-            p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(28.0),
-                width: Val::Px(760.0),
-                padding: UiRect::vertical(Val::Px(3.0)),
-                ..default()
-            })
-            .with_children(|row| {
-                row.spawn((text_f(f, 17.0, namecol, name), Node { width: Val::Px(330.0), ..default() }));
-                row.spawn(text_f(f, 14.0, desccol, desc));
-            });
+            table_row(p, f, name, namecol, 330.0, desc, desccol);
         }
         menu_button(p, f, MenuAction::Back, "BACK");
     });
+}
+
+// The controls reference — a key | action table, reached from the main menu.
+fn spawn_controls_ui(mut commands: Commands, font: Res<MenuFont>) {
+    spawn_frame(&mut commands, ControlsUi);
+    let root = overlay(&mut commands, ControlsUi, 0.5);
+    let f = &font.0;
+    let key = Color::srgb(0.82, 0.88, 1.1);
+    let act = Color::srgb(0.72, 0.76, 0.9);
+    commands.entity(root).with_children(|p| {
+        p.spawn(text_f(f, 48.0, title_color(), "CONTROLS"));
+        for (k, a) in [
+            ("Turn", "Left / Right  or  A / D"),
+            ("Thrust", "Up  or  W"),
+            ("Fire", "Space  or  Left Mouse"),
+            ("Warp (black hole)", "Shift"),
+            ("Chain shot", "Right Mouse  (once earned)"),
+            ("Mass shot: toggle", "Q  (once earned)"),
+            ("Pause", "Esc"),
+            ("Music on / off", "M"),
+        ] {
+            table_row(p, f, k, key, 300.0, a, act);
+        }
+        menu_button(p, f, MenuAction::Back, "BACK");
+    });
+}
+
+// The briefing — a light lore intro plus the run objectives. (Flavor text is placeholder; swap in
+// the real lore whenever it's written.)
+fn spawn_briefing_ui(mut commands: Commands, font: Res<MenuFont>) {
+    spawn_frame(&mut commands, BriefingUi);
+    let root = overlay(&mut commands, BriefingUi, 0.5);
+    let f = &font.0;
+    let flavor = Color::srgb(0.7, 0.74, 0.92);
+    let obj = Color::srgb(0.8, 0.85, 1.05);
+    commands.entity(root).with_children(|p| {
+        p.spawn(text_f(f, 48.0, title_color(), "BRIEFING"));
+        p.spawn(text_f(f, 17.0, flavor, "The Belt has turned hostile. Rock chokes the lanes,"));
+        p.spawn(text_f(f, 17.0, flavor, "and something is steering it from the dark."));
+        p.spawn(text_f(f, 17.0, flavor, "You hold the last violet-drive cutter. Cut the field. Hold the edge."));
+        p.spawn((text_f(f, 22.0, title_color(), "OBJECTIVE"), Node { margin: UiRect::top(Val::Px(14.0)), ..default() }));
+        for line in [
+            "Survive each wave's timer to advance.",
+            "Every 5th wave is a boss — each weaponizes the rocks.",
+            "Bosses drop a new weapon; rare gold rocks grant a life.",
+            "Clear the arc — then try it again with no powerups.",
+        ] {
+            p.spawn(text_f(f, 16.0, obj, line));
+        }
+        menu_button(p, f, MenuAction::Back, "BACK");
+    });
+}
+
+fn despawn_controls_ui(mut commands: Commands, q: Query<Entity, With<ControlsUi>>) {
+    for e in &q {
+        commands.entity(e).despawn();
+    }
+}
+
+fn despawn_briefing_ui(mut commands: Commands, q: Query<Entity, With<BriefingUi>>) {
+    for e in &q {
+        commands.entity(e).despawn();
+    }
 }
 
 fn despawn_achievements_ui(mut commands: Commands, q: Query<Entity, With<AchievementsUi>>) {
@@ -3462,8 +3569,9 @@ fn despawn_achievements_ui(mut commands: Commands, q: Query<Entity, With<Achieve
     }
 }
 
-// The achievements screen: Esc/Enter or the Back button returns to the main menu.
-fn achievements_back(
+// Any sub-screen (achievements / controls / briefing): Esc/Enter or the Back button returns to the
+// main menu. Runs only in those states, so it never interferes with gameplay input.
+fn submenu_back(
     keys: Res<ButtonInput<KeyCode>>,
     mut next: ResMut<NextState<GameState>>,
     mut clicks: EventReader<MenuClick>,
@@ -4010,6 +4118,7 @@ fn main() {
         .insert_resource(Achievements::default())
         .insert_resource(RunFlags::default())
         .insert_resource(GoldRush::default())
+        .insert_resource(FireArmed::default())
         .add_event::<SoundFx>()
         .add_event::<MenuClick>()
         .init_state::<GameState>()
@@ -4078,12 +4187,20 @@ fn main() {
         )
         .add_systems(Update, (music_director, play_sfx))
         .add_systems(Update, menu_start.run_if(in_state(GameState::Menu)))
-        .add_systems(Update, achievements_back.run_if(in_state(GameState::Achievements)))
+        .add_systems(
+            Update,
+            submenu_back.run_if(in_state(GameState::Achievements).or(in_state(GameState::Controls)).or(in_state(GameState::Briefing))),
+        )
         .add_systems(Update, gameover_restart.run_if(in_state(GameState::GameOver)))
+        .add_systems(OnEnter(GameState::Playing), disarm_fire)
         .add_systems(OnEnter(GameState::Menu), (clear_field, spawn_menu_ui))
         .add_systems(OnExit(GameState::Menu), despawn_menu_ui)
         .add_systems(OnEnter(GameState::Achievements), spawn_achievements_ui)
         .add_systems(OnExit(GameState::Achievements), despawn_achievements_ui)
+        .add_systems(OnEnter(GameState::Controls), spawn_controls_ui)
+        .add_systems(OnExit(GameState::Controls), despawn_controls_ui)
+        .add_systems(OnEnter(GameState::Briefing), spawn_briefing_ui)
+        .add_systems(OnExit(GameState::Briefing), despawn_briefing_ui)
         .add_systems(OnEnter(GameState::Paused), spawn_pause_ui)
         .add_systems(OnExit(GameState::Paused), despawn_pause_ui)
         .add_systems(OnEnter(GameState::GameOver), spawn_gameover_ui)
@@ -4109,6 +4226,7 @@ mod tests {
         app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(MassShot::default());
+        app.insert_resource(FireArmed(true)); // mid-run: the gun is armed
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::Space);
@@ -4123,6 +4241,37 @@ mod tests {
         app.update();
         let n = app.world_mut().query::<&Bullet>().iter(app.world()).count();
         assert!(n > 0, "pressing Space should spawn a bullet, got {n}");
+    }
+
+    #[test]
+    fn a_held_fire_button_at_start_does_not_shoot_until_released() {
+        // the click/press that starts a run must not leak into an instant shot: with FireArmed(false)
+        // and the button already held, no bullet spawns until the button is released and pressed again
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_event::<SoundFx>();
+        app.insert_resource(MassShot::default());
+        app.insert_resource(FireArmed(false)); // just entered Playing (disarm_fire ran)
+        let mut input = ButtonInput::<KeyCode>::default();
+        input.press(KeyCode::Space); // still holding the key that started the run
+        app.insert_resource(input);
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.world_mut().spawn((
+            Ship { angle: TAU / 4.0, cooldown: 0.0, invuln: 0.0, flame: 0.0 },
+            Velocity(Vec2::ZERO),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+        app.add_systems(Update, fire);
+        app.update();
+        assert_eq!(app.world_mut().query::<&Bullet>().iter(app.world()).count(), 0, "a held button at start must NOT fire");
+        // release the button → the gun arms
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().release(KeyCode::Space);
+        app.update();
+        assert!(app.world().resource::<FireArmed>().0, "releasing the button arms the gun");
+        // press again → now it fires
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Space);
+        app.update();
+        assert!(app.world_mut().query::<&Bullet>().iter(app.world()).count() > 0, "a fresh press after release fires");
     }
 
     #[test]
