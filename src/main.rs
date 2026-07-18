@@ -37,7 +37,8 @@ const MAX_SPEED: f32 = 560.0; // px/s
 const FIRE_COOLDOWN: f32 = 0.18; // s
 
 const BULLET_SPEED: f32 = 720.0; // px/s
-const BULLET_LIFE: f32 = 1.6; // s
+const BULLET_LIFE: f32 = 1.6; // s — MINIMUM range floor (small windows); real range scales with the arena
+const BULLET_RANGE_FRAC: f32 = 1.5; // bullet travels this × the arena half-width, so reach scales with the screen (fixes "too short on a big display")
 const BULLET_R: f32 = 3.0;
 
 // Mass shot (pickup after boss 2): a bigger, slower, harder-hitting primary. Toggle standard↔mass.
@@ -1260,10 +1261,14 @@ fn fire(
     mut mass: ResMut<MassShot>,
     mut armed: ResMut<FireArmed>,
     mut mode: ResMut<ShotModeFlash>,
+    arena: Res<Arena>,
     mut sfx: EventWriter<SoundFx>,
     mut q: Query<(&mut Ship, &Transform)>,
 ) {
     let dt = time.delta_secs();
+    // bullet lifetime scales with the arena so its reach is a consistent fraction of the screen,
+    // not a fixed distance that looks tiny on a big display (floored at BULLET_LIFE for small windows)
+    let bullet_life = (BULLET_RANGE_FRAC * arena.half.x / BULLET_SPEED).max(BULLET_LIFE);
     // Q toggles standard↔mass once the mass shot is unlocked — with a click + on-screen label
     if mass.unlocked && keys.just_pressed(KeyCode::KeyQ) {
         mass.active = !mass.active;
@@ -1284,7 +1289,7 @@ fn fire(
             let dir = Vec2::from_angle(ship.angle);
             let pos = t.translation.truncate() + dir * SHIP_R;
             commands.spawn((
-                Bullet { life: BULLET_LIFE, trail: Vec::new(), mass: is_mass },
+                Bullet { life: bullet_life, trail: Vec::new(), mass: is_mass },
                 Velocity(dir * BULLET_SPEED),
                 Transform::from_xyz(pos.x, pos.y, 0.0),
             ));
@@ -4707,6 +4712,7 @@ mod tests {
         app.add_event::<SoundFx>();
         app.insert_resource(MassShot::default());
         app.insert_resource(ShotModeFlash::default());
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(FireArmed(false)); // just entered Playing (disarm_fire ran)
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::Space); // still holding the key that started the run
