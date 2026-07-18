@@ -31,9 +31,9 @@ const TAU: f32 = std::f32::consts::TAU;
 
 const SHIP_R: f32 = 15.0;
 const TURN_RATE: f32 = 4.6; // rad/s — snappier aim for precision shooting
-const THRUST: f32 = 620.0; // px/s^2
-const FRICTION: f32 = 0.38; // velocity kept per second — tighter than before (less drift), but still high enough that sustained thrust reaches MAX_SPEED
-const MAX_SPEED: f32 = 560.0; // px/s
+const THRUST: f32 = 1000.0; // px/s^2 — raised to keep a usable top speed against the heavier drag below
+const FRICTION: f32 = 0.15; // velocity kept per second — much heavier drag than before, so the ship sheds momentum fast (~0.37s half-life) for precise, deliberate flying instead of a long glide
+const MAX_SPEED: f32 = 560.0; // px/s (a cap; sustained thrust settles a bit under it)
 const FIRE_COOLDOWN: f32 = 0.18; // s
 
 const BULLET_SPEED: f32 = 720.0; // px/s
