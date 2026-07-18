@@ -75,7 +75,22 @@ jobs:
           sips -z 512 512   assets/logo.png --out icon.iconset/icon_512x512.png
           sips -z 1024 1024 assets/logo.png --out icon.iconset/icon_512x512@2x.png
           iconutil -c icns icon.iconset -o "$app/Contents/Resources/icon.icns"
-          sed "s/__VERSION__/${version}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          # Info.plist written inline so this doesn't depend on a repo file that a checked-out tag may lack
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0"><dict>' \
+            '<key>CFBundleName</key><string>VIOLET EDGE</string>' \
+            '<key>CFBundleDisplayName</key><string>VIOLET EDGE</string>' \
+            '<key>CFBundleExecutable</key><string>violet-edge</string>' \
+            '<key>CFBundleIdentifier</key><string>com.bazstudios.violet-edge</string>' \
+            '<key>CFBundleIconFile</key><string>icon</string>' \
+            '<key>CFBundlePackageType</key><string>APPL</string>' \
+            "<key>CFBundleShortVersionString</key><string>${version}</string>" \
+            "<key>CFBundleVersion</key><string>${version}</string>" \
+            '<key>LSMinimumSystemVersion</key><string>11.0</string>' \
+            '<key>NSHighResolutionCapable</key><true/>' \
+            '</dict></plist>' > "$app/Contents/Info.plist"
           # assemble a drag-to-Applications disk image
           mkdir dmgroot
           cp -R "$app" dmgroot/
