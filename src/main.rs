@@ -157,6 +157,7 @@ const ORANGE_BLAST_R: f32 = 150.0; // explosive-asteroid blast radius — big en
 const ORANGE_FUSE: f32 = 0.09; // brief lit flash after a lethal hit before it detonates (a visible "pop")
 
 const RESPAWN_DELAY: f32 = 1.3; // s the ship stays gone after dying
+const GAMEOVER_DELAY: f32 = 1.5; // s to let the final death play out before the Game Over screen
 const SPAWN_INVULN: f32 = 2.0; // s of blink-invulnerability on (re)spawn
 const TRAIL_LEN: usize = 10; // bullet trail points kept
 const STAR_COUNT: usize = 90;
@@ -366,7 +367,7 @@ fn burst(commands: &mut Commands, pos: Vec2, color: Color, count: usize, speed: 
 fn kill_ship(
     commands: &mut Commands,
     run: &mut Run,
-    next: &mut NextState<GameState>,
+    _next: &mut NextState<GameState>, // game-over is now triggered by `respawn` after a beat, not here
     sfx: &mut EventWriter<SoundFx>,
     ship_e: Entity,
     pos: Vec2,
@@ -377,11 +378,9 @@ fn kill_ship(
     sfx.write(SoundFx::Death);
     commands.entity(ship_e).despawn();
     run.lives -= 1;
-    if run.lives <= 0 {
-        next.set(GameState::GameOver);
-    } else {
-        run.respawn = RESPAWN_DELAY;
-    }
+    // Even on the last life we DON'T jump straight to Game Over — set a timer so the death
+    // explosion plays out; `respawn` makes the transition once it elapses (less abrupt).
+    run.respawn = if run.lives <= 0 { GAMEOVER_DELAY } else { RESPAWN_DELAY };
 }
 
 // A combat kill of an enemy mob: award score, splash debris, play the death zap, despawn.
@@ -1337,13 +1336,17 @@ fn ship_death(
     }
 }
 
-fn respawn(mut commands: Commands, time: Res<Time>, mut run: ResMut<Run>, ships: Query<&Ship>) {
+fn respawn(mut commands: Commands, time: Res<Time>, mut run: ResMut<Run>, mut next: ResMut<NextState<GameState>>, ships: Query<&Ship>) {
     if run.respawn <= 0.0 {
         return;
     }
     run.respawn -= time.delta_secs();
-    if run.respawn <= 0.0 && ships.is_empty() {
-        spawn_player(&mut commands);
+    if run.respawn <= 0.0 {
+        if run.lives <= 0 {
+            next.set(GameState::GameOver); // a beat after the final death → then the screen
+        } else if ships.is_empty() {
+            spawn_player(&mut commands);
+        }
     }
 }
 
@@ -5297,9 +5300,27 @@ mod tests {
         ));
         app.add_systems(Update, ship_death);
         app.update();
-        // last life → no respawn scheduled (it goes to Game Over instead)
+        // last life → NOT an instant Game Over: a short countdown is armed so the death plays out,
+        // and `respawn` makes the transition once it elapses.
         assert_eq!(app.world().resource::<Run>().lives, 0);
-        assert_eq!(app.world().resource::<Run>().respawn, 0.0, "the last life is game over, not a respawn");
+        assert_eq!(app.world().resource::<Run>().respawn, GAMEOVER_DELAY, "the final death arms a game-over beat, not an instant screen");
+    }
+
+    #[test]
+    fn respawn_flips_to_game_over_when_out_of_lives() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(NextState::<GameState>::default());
+        // a game-over countdown all but elapsed, with no lives left — any dt drives it <= 0
+        app.insert_resource(Run { lives: 0, respawn: f32::EPSILON });
+        app.add_systems(Update, respawn);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert!(
+            matches!(app.world().resource::<NextState<GameState>>(), NextState::Pending(GameState::GameOver)),
+            "once the game-over countdown elapses with no lives, respawn transitions to Game Over"
+        );
     }
 
     #[test]
