@@ -158,6 +158,8 @@ const ORANGE_FUSE: f32 = 0.09; // brief lit flash after a lethal hit before it d
 
 const RESPAWN_DELAY: f32 = 1.3; // s the ship stays gone after dying
 const GAMEOVER_DELAY: f32 = 1.5; // s to let the final death play out before the Game Over screen
+const HUD_FLASH_TIME: f32 = 0.7; // s the warp pips / life icons flicker after refilling / gaining a life
+const SHOT_MODE_SHOW: f32 = 1.4; // s the "MASS/STANDARD SHOT" label lingers after a toggle
 const SPAWN_INVULN: f32 = 2.0; // s of blink-invulnerability on (re)spawn
 const TRAIL_LEN: usize = 10; // bullet trail points kept
 const STAR_COUNT: usize = 90;
@@ -642,6 +644,8 @@ struct WaveText; // top-center "WAVE n  M:SS"
 struct ScoreText; // top-left "SCORE n"
 #[derive(Component)]
 struct WaveBannerText; // big center-screen "WAVE n" flash that fades out
+#[derive(Component)]
+struct ShotModeText; // bottom-center "MASS/STANDARD SHOT" label, fades after a Q toggle
 
 // Warp: a slow missile that tears open a black hole which drags in + consumes rocks.
 #[derive(Component)]
@@ -656,6 +660,18 @@ struct BlackHole {
 
 #[derive(Resource, Default)]
 struct Score(u32);
+
+// Brief HUD flourishes: warp pips flicker for `pips` seconds after they refill, life icons for
+// `life` seconds after a life is gained. Set at the event, ticked down by `hud_flash_tick`.
+#[derive(Resource, Default)]
+struct HudFlash {
+    pips: f32,
+    life: f32,
+}
+
+// Countdown for the "MASS SHOT / STANDARD SHOT" label after a Q toggle (drives its fade).
+#[derive(Resource, Default)]
+struct ShotModeFlash(f32);
 
 // The persisted top-5 scores, sorted descending. `just_placed` is the index THIS run's score landed
 // at (Some when it made the table, for the game-over highlight); it's transient, not saved.
@@ -923,6 +939,27 @@ fn spawn_hud(mut commands: Commands) {
                 Text::new(""),
                 TextFont { font_size: 66.0, ..default() },
                 TextColor(Color::srgba(0.8, 0.9, 1.3, 0.0)),
+            ));
+        });
+    // shot-mode label (bottom-center, above the warp pips) — fades in/out on a Q toggle
+    commands
+        .spawn((
+            Hud,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(56.0),
+                left: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
+        .with_children(|p| {
+            p.spawn((
+                ShotModeText,
+                Text::new(""),
+                TextFont { font_size: 20.0, ..default() },
+                TextColor(Color::srgba(0.72, 0.28, 1.0, 0.0)), // violet (player kit), starts hidden
             ));
         });
 }
@@ -1222,13 +1259,16 @@ fn fire(
     mouse: Res<ButtonInput<MouseButton>>,
     mut mass: ResMut<MassShot>,
     mut armed: ResMut<FireArmed>,
+    mut mode: ResMut<ShotModeFlash>,
     mut sfx: EventWriter<SoundFx>,
     mut q: Query<(&mut Ship, &Transform)>,
 ) {
     let dt = time.delta_secs();
-    // Q toggles standard↔mass once the mass shot is unlocked
+    // Q toggles standard↔mass once the mass shot is unlocked — with a click + on-screen label
     if mass.unlocked && keys.just_pressed(KeyCode::KeyQ) {
         mass.active = !mass.active;
+        mode.0 = SHOT_MODE_SHOW;
+        sfx.write(SoundFx::Toggle);
     }
     let is_mass = mass.unlocked && mass.active;
     let want_fire = keys.pressed(KeyCode::Space) || mouse.pressed(MouseButton::Left);
@@ -1895,6 +1935,7 @@ fn warp_fire(
     mut commands: Commands,
     mut warp: ResMut<Warp>,
     mut sfx: EventWriter<SoundFx>,
+    mut flash: ResMut<HudFlash>,
     ships: Query<(&Ship, &Transform)>,
 ) {
     // While refilling (all charges were spent), tick the long cooldown; when it
@@ -1904,6 +1945,7 @@ fn warp_fire(
         if warp.cooldown <= 0.0 {
             warp.cooldown = 0.0;
             warp.charges = WARP_MAX_CHARGES;
+            flash.pips = HUD_FLASH_TIME; // charges just came back — flicker the pips
         }
         return;
     }
@@ -2941,14 +2983,35 @@ fn wave_banner_update(
     }
 }
 
+// Tick the HUD flash timers (pips/lives) set at their events.
+fn hud_flash_tick(time: Res<Time>, mut flash: ResMut<HudFlash>) {
+    let dt = time.delta_secs();
+    flash.pips = (flash.pips - dt).max(0.0);
+    flash.life = (flash.life - dt).max(0.0);
+}
+
+// The "MASS SHOT / STANDARD SHOT" label: shown on a toggle, held, then fades over its last stretch.
+fn shot_mode_update(time: Res<Time>, mut flash: ResMut<ShotModeFlash>, mass: Res<MassShot>, mut q: Query<(&mut Text, &mut TextColor), With<ShotModeText>>) {
+    if flash.0 > 0.0 {
+        flash.0 -= time.delta_secs();
+    }
+    let alpha = (flash.0 / 0.3).clamp(0.0, 1.0); // full while > 0.3s left, then fade out
+    for (mut text, mut color) in &mut q {
+        if flash.0 > 0.0 {
+            text.0 = if mass.active { "MASS SHOT" } else { "STANDARD SHOT" }.to_string();
+        }
+        color.0 = color.0.with_alpha(alpha);
+    }
+}
+
 fn render(
     mut gizmos: Gizmos,
     time: Res<Time>,
     arena: Res<Arena>,
     run: Res<Run>,
     dev: Res<Dev>,
-    // warp + chain + state grouped into one tuple param to stay within Bevy's 16-param system limit
-    abilities: (Res<Warp>, Res<Chain>, Res<State<GameState>>),
+    // warp + chain + state + hud-flash grouped into one tuple param to stay within Bevy's 16-param limit
+    abilities: (Res<Warp>, Res<Chain>, Res<State<GameState>>, Res<HudFlash>),
     wf: Res<WarpField>,
     stars: Query<(&Star, &Transform)>,
     ships: Query<(&Ship, &Transform)>,
@@ -2965,6 +3028,9 @@ fn render(
     let t = time.elapsed_secs();
     let (warp_res, chain) = (&abilities.0, &abilities.1);
     let show_run = run_active(abilities.2.get()); // grid + HUD icons only while a run is on
+    let hud_flash = &abilities.3;
+    // a rapid bright shimmer applied to pips/lives right after they refill / a life is gained
+    let flick = |active: bool| if active { 1.1 + 0.8 * (t * 40.0).sin() } else { 1.0 };
 
     // stars (backmost). Subtle during a run so they never distract; on the menu they're a feature —
     // bigger, brighter, with a soft glow and diagonal sparkle rays on the brightest ones.
@@ -3235,6 +3301,7 @@ fn render(
 
     // lives HUD icons (top-right, under the "LIVES" label) — only while a run is on
     if show_run {
+        let life_col = dim(sc, flick(hud_flash.life > 0.0)); // flickers briefly on a new life
         for k in 0..run.lives.max(0) {
             let p = Vec2::new(h.x - 32.0 - k as f32 * 24.0, h.y - 48.0);
             let icon = [
@@ -3244,7 +3311,7 @@ fn render(
                 p + Vec2::new(7.0, -7.0),
                 p + Vec2::new(0.0, 9.0),
             ];
-            gizmos.linestrip_2d(icon, sc);
+            gizmos.linestrip_2d(icon, life_col);
         }
     }
 
@@ -3253,9 +3320,10 @@ fn render(
     let gap = 22.0;
     let py = -h.y + 28.0;
     if show_run {
+        let pip_lit = dim(warp, flick(hud_flash.pips > 0.0)); // flickers briefly when charges refill
         for k in 0..WARP_MAX_CHARGES {
             let px = (k as f32 - (WARP_MAX_CHARGES as f32 - 1.0) * 0.5) * gap;
-            let col = if k < warp_res.charges { warp } else { dim(warp, 0.14) };
+            let col = if k < warp_res.charges { pip_lit } else { dim(warp, 0.14) };
             gizmos.circle_2d(Isometry2d::from_translation(Vec2::new(px, py)), 5.0, col);
         }
         if warp_res.cooldown > 0.0 {
@@ -4077,6 +4145,7 @@ fn gold_rush_update(
     mut commands: Commands,
     mut rush: ResMut<GoldRush>,
     mut run: ResMut<Run>,
+    mut flash: ResMut<HudFlash>,
     gold: Query<(), With<Gold>>,
     bank: Option<Res<SfxBank>>,
     root: Query<Entity, With<ToastRoot>>,
@@ -4086,6 +4155,7 @@ fn gold_rush_update(
     }
     if !rush.forfeited && run.lives < LIFE_CAP {
         run.lives += 1;
+        flash.life = HUD_FLASH_TIME; // flicker the life icons on the new life
         if let Some(r) = root.iter().next() {
             commands.entity(r).with_children(|p| {
                 p.spawn((
@@ -4331,6 +4401,7 @@ enum SoundFx {
     EnemyShot, // an enemy mob firing
     EnemyDie,  // an enemy mob destroyed
     Warp,      // the warp/black-hole launch
+    Toggle,    // switching standard ↔ mass shot
 }
 
 // Pre-synthesized SFX clips (see `audio.rs`), built once at startup.
@@ -4345,6 +4416,7 @@ struct SfxBank {
     warp: Handle<AudioSource>,
     achievement: Handle<AudioSource>,
     life: Handle<AudioSource>, // gold-rock 1UP jingle
+    toggle: Handle<AudioSource>, // standard ↔ mass shot switch
 }
 
 fn start_sfx(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
@@ -4358,6 +4430,7 @@ fn start_sfx(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
         warp: sources.add(AudioSource { bytes: audio::warp_wav().into() }),
         achievement: sources.add(AudioSource { bytes: audio::achievement_sfx_wav().into() }),
         life: sources.add(AudioSource { bytes: audio::life_sfx_wav().into() }),
+        toggle: sources.add(AudioSource { bytes: audio::toggle_sfx_wav().into() }),
     });
 }
 
@@ -4378,8 +4451,8 @@ fn play_sfx(mut commands: Commands, bank: Option<Res<SfxBank>>, mut events: Even
         events.clear();
         return;
     };
-    let (mut fire, mut mine, mut death, mut eshot, mut edie, mut warp) =
-        (false, false, false, false, false, false);
+    let (mut fire, mut mine, mut death, mut eshot, mut edie, mut warp, mut toggle) =
+        (false, false, false, false, false, false, false);
     let mut brk: Option<u8> = None; // deepest (largest) rock that broke this frame
     for e in events.read() {
         match e {
@@ -4390,6 +4463,7 @@ fn play_sfx(mut commands: Commands, bank: Option<Res<SfxBank>>, mut events: Even
             SoundFx::EnemyShot => eshot = true,
             SoundFx::EnemyDie => edie = true,
             SoundFx::Warp => warp = true,
+            SoundFx::Toggle => toggle = true,
         }
     }
     if fire {
@@ -4415,6 +4489,9 @@ fn play_sfx(mut commands: Commands, bank: Option<Res<SfxBank>>, mut events: Even
     }
     if warp {
         one_shot(&mut commands, bank.warp.clone(), 0.6); // the ultimate — a big, distinct whoosh
+    }
+    if toggle {
+        one_shot(&mut commands, bank.toggle.clone(), 0.4); // weapon-switch click
     }
 }
 
@@ -4491,6 +4568,8 @@ fn main() {
         .insert_resource(FireArmed::default())
         .insert_resource(TitleIntroPlayed::default())
         .insert_resource(HighScores::default())
+        .insert_resource(HudFlash::default())
+        .insert_resource(ShotModeFlash::default())
         .add_event::<SoundFx>()
         .add_event::<MenuClick>()
         .init_state::<GameState>()
@@ -4498,7 +4577,7 @@ fn main() {
         // always: keep the arena sized, handle pause input, refresh the HUD text
         .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update).chain())
         // always: watch for achievement unlocks + age out toasts + hide the HUD off-run + menu buttons
-        .add_systems(Update, (achievements, toast_update, hud_visibility, button_shimmer, button_click))
+        .add_systems(Update, (achievements, toast_update, hud_visibility, button_shimmer, button_click, hud_flash_tick, shot_mode_update))
         // the neon warm-up + frame pulse is a START-MENU flourish only (not the achievements screen)
         .add_systems(Update, menu_title_fx.run_if(in_state(GameState::Menu)))
         // render in PostUpdate so it ALWAYS runs after every Update system (incl.
@@ -4601,6 +4680,7 @@ mod tests {
         app.insert_resource(RunFlags::default());
         app.insert_resource(Score(0));
         app.insert_resource(MassShot::default());
+        app.insert_resource(ShotModeFlash::default());
         app.insert_resource(FireArmed(true)); // mid-run: the gun is armed
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         let mut input = ButtonInput::<KeyCode>::default();
@@ -4626,6 +4706,7 @@ mod tests {
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
         app.insert_resource(MassShot::default());
+        app.insert_resource(ShotModeFlash::default());
         app.insert_resource(FireArmed(false)); // just entered Playing (disarm_fire ran)
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::Space); // still holding the key that started the run
@@ -4849,6 +4930,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.insert_resource(GoldRush { active: true, forfeited: false, cooldown: 0.0 });
+        app.insert_resource(HudFlash::default());
         app.insert_resource(Run { lives: 1, respawn: 0.0 }); // below the cap, so a life can be restored
         // no Gold entities remain → the player cleared the whole lineage
         app.add_systems(Update, gold_rush_update);
@@ -4862,6 +4944,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.insert_resource(GoldRush { active: true, forfeited: false, cooldown: 0.0 });
+        app.insert_resource(HudFlash::default());
         app.insert_resource(Run { lives: LIFE_CAP, respawn: 0.0 });
         app.add_systems(Update, gold_rush_update);
         app.update();
@@ -4873,6 +4956,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.insert_resource(GoldRush { active: true, forfeited: true, cooldown: 0.0 }); // a piece was lost
+        app.insert_resource(HudFlash::default());
         app.insert_resource(Run { lives: 1, respawn: 0.0 }); // below the cap, so only the forfeit blocks it
         app.add_systems(Update, gold_rush_update);
         app.update();
@@ -5402,6 +5486,7 @@ mod tests {
         app.insert_resource(Stats::default());
         app.insert_resource(RunFlags::default());
         app.insert_resource(Warp { charges: WARP_MAX_CHARGES, cooldown: 0.0 });
+        app.insert_resource(HudFlash::default());
         let mut input = ButtonInput::<KeyCode>::default();
         input.press(KeyCode::ShiftLeft); // stays "just_pressed" (no clear system) → fires each frame
         app.insert_resource(input);

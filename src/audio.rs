@@ -522,6 +522,15 @@ pub fn life_sfx_wav() -> Vec<u8> {
     })
 }
 
+// Weapon-switch blip (standard ↔ mass): a short, crisp two-step "chk-chk" that rises in pitch.
+pub fn toggle_sfx_wav() -> Vec<u8> {
+    render_sfx(0.13, |t, _| {
+        let (f, start) = if t < 0.05 { (600.0, 0.0) } else { (900.0, 0.05) }; // step up on the 2nd click
+        let env = (-((t - start) * 55.0)).exp(); // re-pluck at each step
+        (square(f * t) * 0.45 + (TAU * f * t).sin() * 0.55) * env * 0.5
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +563,7 @@ mod tests {
             warp_wav(),
             achievement_sfx_wav(),
             life_sfx_wav(),
+            toggle_sfx_wav(),
         ] {
             assert_eq!(&wav[0..4], b"RIFF", "sfx starts with a RIFF header");
             assert_eq!(&wav[8..12], b"WAVE", "sfx is a WAVE file");
