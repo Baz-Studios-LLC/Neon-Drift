@@ -56,7 +56,8 @@ const SPAWN_INTERVAL: f32 = 1.6; // seconds between streamed-in replacement rock
 const WARP_MAX_CHARGES: i32 = 3; // fire all 3, THEN the long cooldown refills them together
 const WARP_COOLDOWN: f32 = 35.0; // long refill once all charges are spent — not spammable
 const WARP_MISSILE_SPEED: f32 = 550.0;
-const WARP_MISSILE_LIFE: f32 = 3.0; // long enough to cross the whole arena — it flies until it nears the wall it's heading for (so a shot from a corner reaches the far side, not just mid-arena)
+const WARP_MISSILE_LIFE: f32 = 1.4; // ~770px max — but it detonates the instant it hits a rock, so in a busy field it opens the hole right there rather than sailing across the arena
+const WARP_MISSILE_R: f32 = 10.0; // contact radius for detonating on an asteroid
 const WARP_HOLE_LIFE: f32 = 2.6;
 const WARP_PULL_RADIUS: f32 = 500.0; // a bit bigger than the old 440 (JS 360 read too small
 // with our longer missile throw); still well short of arena-spanning (~755 was too far)
@@ -172,8 +173,8 @@ const WAVE_BANNER_FADE: f32 = 1.2; // of that, the trailing fade-out duration
 
 // Bright (>1.0) colors so the HDR camera's bloom makes them glow.
 fn ship_color() -> Color {
-    Color::srgb(3.2, 0.7, 6.5)
-} // neon violet — the player + its kit (bright peak so bloom keeps it glowing, not dark)
+    Color::srgb(2.6, 0.55, 5.2)
+} // neon violet — the player + its kit (peak dialled back ~20% to ease the bloom)
 fn flame_color() -> Color {
     Color::srgb(3.2, 1.7, 5.0)
 } // hot purple-white exhaust
@@ -200,10 +201,10 @@ fn bullet_power(mass: bool) -> i32 {
     }
 }
 fn rock_color() -> Color {
-    Color::srgb(0.3, 2.4, 5.0)
-} // neon blue
+    Color::srgb(0.25, 1.9, 4.0)
+} // neon blue (peak dialled back ~20% to ease the bloom)
 fn dense_color() -> Color {
-    Color::srgb(0.5, 5.0, 1.4)
+    Color::srgb(0.4, 4.0, 1.1)
 } // neon green — dense (tanky) asteroids
 fn grid_color() -> Color {
     Color::srgb(0.02, 0.06, 0.2)
@@ -215,11 +216,11 @@ fn warp_color() -> Color {
     Color::srgb(2.6, 1.2, 5.0)
 } // warp purple (player kit)
 fn mine_color() -> Color {
-    Color::srgb(5.0, 0.7, 1.7)
-} // hot crimson = danger
+    Color::srgb(4.0, 0.55, 1.35)
+} // hot crimson = danger (peak dialled back ~20% to ease the bloom)
 fn enemy_color() -> Color {
-    Color::srgb(5.0, 3.6, 0.5)
-} // neon yellow — enemy ships + their shots
+    Color::srgb(4.0, 2.9, 0.4)
+} // neon yellow — enemy ships + their shots (peak dialled back ~20%)
 fn boss_color() -> Color {
     Color::srgb(5.0, 1.6, 4.1)
 } // neon magenta — the boss
@@ -1932,6 +1933,7 @@ fn warp_missile_update(
     time: Res<Time>,
     arena: Res<Arena>,
     mut q: Query<(Entity, &Transform, &Velocity, &mut WarpMissile)>,
+    rocks: Query<(&Transform, &Asteroid), Without<Gold>>, // gold is skipped — the warp shouldn't grief the 1UP
 ) {
     let dt = time.delta_secs();
     let h = arena.half;
@@ -1940,10 +1942,15 @@ fn warp_missile_update(
         m.life -= dt;
         let p = t.translation.truncate();
         // detonate only at the wall it's HEADING TOWARD — so a shot launched from near an edge flies
-        // inward instead of popping at the launch edge, and it reaches the far side before opening.
+        // inward instead of popping at the launch edge.
         let into_x = (p.x > h.x - margin && v.0.x > 0.0) || (p.x < -h.x + margin && v.0.x < 0.0);
         let into_y = (p.y > h.y - margin && v.0.y > 0.0) || (p.y < -h.y + margin && v.0.y < 0.0);
-        if m.life <= 0.0 || into_x || into_y {
+        // …and go off the instant it hits a rock, so it opens the hole on contact instead of passing through
+        let hit_rock = rocks.iter().any(|(rt, a)| {
+            let rr = asteroid_radius(a.size) + WARP_MISSILE_R;
+            p.distance_squared(rt.translation.truncate()) < rr * rr
+        });
+        if m.life <= 0.0 || into_x || into_y || hit_rock {
             let c = Vec2::new(p.x.clamp(-h.x + margin, h.x - margin), p.y.clamp(-h.y + margin, h.y - margin));
             commands.entity(e).despawn();
             commands.spawn((BlackHole { life: WARP_HOLE_LIFE, spin: 0.0 }, Transform::from_xyz(c.x, c.y, 0.0)));
@@ -2982,8 +2989,9 @@ fn render(
 
     // grid — faint, brighter per-line shimmer; bends toward an active warp hole (and rubber-snaps
     // back). Only while a run is on — off-run the color is zeroed so the menu shows no grid.
-    let grid = dim(grid_color(), if show_run { 1.0 } else { 0.0 });
     let warping = wf.amount.abs() > 0.001;
+    // grid brightens while a warp is stretching it, so the pull reads on the backdrop
+    let grid = dim(grid_color(), if show_run { if warping { 3.0 } else { 1.0 } } else { 0.0 });
     const SUBDIV: usize = 14;
     let mut i = 0;
     let mut x = -(h.x / GRID_CELL).floor() * GRID_CELL;
@@ -3167,19 +3175,25 @@ fn render(
     let core = Color::srgb(5.0, 4.2, 5.6); // white-hot center
     for (b, bt) in &bullets {
         let c = bt.translation.truncate();
-        // mass shots are fatter and read in a hotter violet than the standard flame
-        let base = if b.mass { mass_color() } else { bullet_color() };
-        let flame_tip = dim(base, 0.5); // deep (tail)
-        let flame_base = mix(base, core, 0.35); // hot (near the head)
         let br = bullet_radius(b.mass);
-        let n = b.trail.len();
-        for k in 0..n {
-            let f = if n > 1 { k as f32 / (n - 1) as f32 } else { 1.0 }; // 0 tail → 1 head
-            let r = br * (0.12 + 0.85 * f); // taper to a point at the tail
-            gizmos.circle_2d(Isometry2d::from_translation(b.trail[k]), r, mix(flame_tip, flame_base, f * f));
+        if b.mass {
+            // mass shot: a fat hot-violet round with a tapering trail
+            let base = mass_color();
+            let flame_tip = dim(base, 0.5); // deep (tail)
+            let flame_base = mix(base, core, 0.35); // hot (near the head)
+            let n = b.trail.len();
+            for k in 0..n {
+                let f = if n > 1 { k as f32 / (n - 1) as f32 } else { 1.0 }; // 0 tail → 1 head
+                let r = br * (0.12 + 0.85 * f); // taper to a point at the tail
+                gizmos.circle_2d(Isometry2d::from_translation(b.trail[k]), r, mix(flame_tip, flame_base, f * f));
+            }
+            gizmos.circle_2d(Isometry2d::from_translation(c), br * 0.75, flame_base);
+            gizmos.circle_2d(Isometry2d::from_translation(c), br * 0.38, core);
+        } else {
+            // standard shot: a single clean purple orb (a trail-flame read wrong on a big screen)
+            gizmos.circle_2d(Isometry2d::from_translation(c), br, bullet_color());
+            gizmos.circle_2d(Isometry2d::from_translation(c), br * 0.5, core);
         }
-        gizmos.circle_2d(Isometry2d::from_translation(c), br * 0.75, flame_base);
-        gizmos.circle_2d(Isometry2d::from_translation(c), br * 0.38, core);
     }
 
     // ship — flame + hull (blinks while invulnerable)
@@ -4385,7 +4399,7 @@ fn play_sfx(mut commands: Commands, bank: Option<Res<SfxBank>>, mut events: Even
         one_shot(&mut commands, clip, 0.3);
     }
     if mine {
-        one_shot(&mut commands, bank.mine.clone(), 0.8); // the explosion should dominate briefly
+        one_shot(&mut commands, bank.mine.clone(), 0.55); // present but softer — the old 0.8 was harsh on headphones
     }
     if death {
         one_shot(&mut commands, bank.death.clone(), 0.7); // losing a life is a big, clear event

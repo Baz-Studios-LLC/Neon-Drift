@@ -409,15 +409,14 @@ pub fn break_sfx_wav(size: u8) -> Vec<u8> {
 /// it lands heavy instead of a soft, clean sine.
 pub fn mine_sfx_wav() -> Vec<u8> {
     render_sfx(0.55, |t, i| {
-        // CRACK: sharp bright noise transient on the detonation attack
-        let crack = (noise(i) - noise(i + 2)) * (-t * 45.0).exp();
-        // BOOM: deep sine sweeping 160 → 28 Hz — deeper, subbier floor than the old 220→35
+        // Softer than before — the bright crack + broadband roar + heavy overdrive were harsh on
+        // headphones. Keep the deep boom; trim the crack, the noise roar, and the saturation.
+        let crack = (noise(i) - noise(i + 2)) * (-t * 55.0).exp(); // shorter, less ringing transient
+        // BOOM: deep sine sweeping 160 → 28 Hz — the round, non-harsh body of the thud
         let freq = 28.0 + 132.0 * (-t * 11.0).exp();
         let boom = (TAU * freq * t).sin() * (-t * 5.0).exp();
-        // BLAST: broadband noise roar that fills out the explosion
-        let blast = (noise(i) - noise(i + 5)) * 0.5 * (-t * 8.0).exp();
-        // overdrive the sum into saturation for a loud, heavy landing; boom weighted up for depth
-        ((boom * 1.5 + crack * 0.7 + blast * 0.55) * 1.8).tanh()
+        let blast = (noise(i) - noise(i + 5)) * 0.5 * (-t * 9.0).exp(); // gentler broadband tail
+        ((boom * 1.5 + crack * 0.4 + blast * 0.3) * 1.25).tanh()
     })
 }
 
