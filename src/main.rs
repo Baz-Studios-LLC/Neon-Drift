@@ -132,7 +132,7 @@ const DEVOURER_BASE_R: f32 = 22.0; // starts small (a size-1 rock)
 const DEVOURER_MAX_R: f32 = 200.0; // fully gorged — swells huge, then OVERLOADS and bursts (see devourer_update)
 const DEVOURER_BURST_R: f32 = 420.0; // overload blast reach — near screen-wide; escapable only by being far
 const DEVOURER_GROW_PER_EAT: f32 = 0.09; // grow step per rock (~11 rocks → max size)
-const DEVOURER_HEAL_PER_EAT: i32 = 4; // HP regained per rock (tankier the more it feeds)
+const DEVOURER_HEAL_PER_EAT: i32 = 2; // HP regained per rock (was 4 — it out-healed player fire and dragged the fight out)
 const DEVOURER_SHRINK_PER_HIT: f32 = 0.03; // each player hit claws its size back (~⅓ of a rock's growth) — keeps it manageable and lets you hold off the overload
 const DEVOURER_SPEED: f32 = 95.0; // px/s seek speed (below the ship's, so it's dodgeable)
 
@@ -154,7 +154,7 @@ const RESTITUTION: f32 = 1.0; // fully elastic bounce
 const MIN_DRIFT: f32 = 30.0; // px/s — rocks never fully stop (elastic hits can zero them → "stuck")
 const FRAGMENT_GRACE: f32 = 1.8; // s a freshly-broken fragment is protected from off-screen culling
 const GOLD_GRACE: f32 = 6.0; // gold fragments get a longer window (recycle, not culled) — a fair chance to catch them before one can drift off and forfeit the life
-const ORANGE_BLAST_R: f32 = 150.0; // explosive-asteroid blast radius — big enough to clearly engulf neighbours
+const ORANGE_BLAST_R: f32 = 250.0; // explosive-asteroid kill/chain radius (+ the victim's own radius). Was 150 — too small on big screens, so it looked huge (the particle burst throws to ~440) but barely caught neighbours. Now the reach matches the visual.
 const ORANGE_FUSE: f32 = 0.09; // brief lit flash after a lethal hit before it detonates (a visible "pop")
 
 const RESPAWN_DELAY: f32 = 1.3; // s the ship stays gone after dying
