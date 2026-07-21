@@ -944,6 +944,34 @@ fn is_devourer_wave(level: i32) -> bool {
 fn is_slinger_wave(level: i32) -> bool {
     is_boss_wave(level) && content_wave(level) == 15
 }
+// True during the run-up to a boss wave (the last BOSS_CAMEO_SECS before it): drives the background
+// cameo, the music riser, and clearing stray mobs off the field so the boss arrives to a clean arena.
+fn boss_incoming(wave: &Wave) -> bool {
+    !is_boss_wave(wave.level) && is_boss_wave(wave.level + 1) && wave.calm <= 0.0 && wave.timer <= BOSS_CAMEO_SECS
+}
+// Which boss the given level's wave is (or, for the run-up, `level + 1`). Used for the cameo + color.
+fn boss_kind(level: i32) -> BossKind {
+    if is_devourer_wave(level) {
+        BossKind::Devourer
+    } else if is_slinger_wave(level) {
+        BossKind::Slinger
+    } else {
+        BossKind::Warden
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BossKind {
+    Warden,
+    Devourer,
+    Slinger,
+}
+fn boss_kind_color(k: BossKind) -> Color {
+    match k {
+        BossKind::Warden => boss_color(),
+        BossKind::Devourer => devourer_color(),
+        BossKind::Slinger => slinger_color(),
+    }
+}
 fn devourer_radius(grow: f32) -> f32 {
     DEVOURER_BASE_R + grow.clamp(0.0, 1.0) * (DEVOURER_MAX_R - DEVOURER_BASE_R)
 }
@@ -2571,6 +2599,7 @@ fn enemy_update(
     time: Res<Time>,
     mut commands: Commands,
     arena: Res<Arena>,
+    wave: Res<Wave>,
     mut sfx: EventWriter<SoundFx>,
     ships: Query<&Transform, With<Ship>>,
     mines: Query<&Transform, With<Mine>>,
@@ -2602,9 +2631,10 @@ fn enemy_update(
             continue;
         }
 
-        // lifetime → flee straight out and despawn once gone
+        // lifetime → flee straight out and despawn once gone. A boss also clears the field: any mob
+        // still around in the run-up flees so the boss arrives to a clean arena.
         en.life -= dt;
-        if en.life <= 0.0 {
+        if en.life <= 0.0 || boss_incoming(&wave) {
             en.fleeing = true;
         }
         if en.fleeing {
@@ -2743,17 +2773,32 @@ fn top_up_limpets(
 fn limpet_update(
     time: Res<Time>,
     mut commands: Commands,
+    arena: Res<Arena>,
+    wave: Res<Wave>,
     mut sfx: EventWriter<SoundFx>,
-    mut limpets: Query<(&mut Transform, &mut Velocity, &mut Limpet)>,
+    mut limpets: Query<(Entity, &mut Transform, &mut Velocity, &mut Limpet)>,
     rocks: Query<(Entity, &Transform, &Asteroid), Without<Limpet>>,
     ships: Query<&Transform, (With<Ship>, Without<Limpet>)>,
     holes: Query<&Transform, (With<BlackHole>, Without<Limpet>)>,
 ) {
     let dt = time.delta_secs();
+    let h = arena.half;
     let mut rng = rand::thread_rng();
     let ship = ships.iter().next().map(|t| t.translation.truncate());
-    for (mut lt, mut lv, mut lp) in &mut limpets {
+    for (le, mut lt, mut lv, mut lp) in &mut limpets {
         let lc = lt.translation.truncate();
+        // a boss is arriving → abandon the rock and flee straight off-screen (mobs clear the field for
+        // the boss). Despawn once fully gone.
+        if boss_incoming(&wave) {
+            lp.host = None;
+            lp.guard = None;
+            let out = lc.normalize_or_zero();
+            lv.0 = (if out == Vec2::ZERO { Vec2::Y } else { out }) * LIMPET_SPEED * 1.8;
+            if lc.x.abs() > h.x + LIMPET_R * 2.0 || lc.y.abs() > h.y + LIMPET_R * 2.0 {
+                commands.entity(le).despawn();
+            }
+            continue;
+        }
         // caught in a warp → yield: let black_hole_update drag it off its rock + consume it (don't
         // fight the pull by rigidly re-gluing to the rim)
         if holes.iter().any(|ht| ht.translation.truncate().distance(lc) < WARP_PULL_RADIUS) {
@@ -4293,18 +4338,40 @@ fn render_boss(
         }
     }
 
-    // cameo: the boss drifts by in the background in the run-up to its wave
-    if !is_boss_wave(wave.level) && is_boss_wave(wave.level + 1) && wave.calm <= 0.0 && wave.timer <= BOSS_CAMEO_SECS {
+    // cameo: the boss THAT'S ACTUALLY COMING drifts by in the background during the run-up — its own
+    // silhouette + colour, so you know who you're about to face.
+    if boss_incoming(&wave) {
         let prog = ((BOSS_CAMEO_SECS - wave.timer) / BOSS_CAMEO_SECS).clamp(0.0, 1.0);
         let c = Vec2::new(-h.x - 150.0 + (2.0 * h.x + 300.0) * prog, h.y * 0.45);
-        let ghost: Vec<Vec2> = (0..=20)
-            .map(|k| {
-                let a = k as f32 / 20.0 * TAU + t * 0.3;
-                let r = BOSS_R * 1.5 * if k % 2 == 0 { 1.0 } else { 0.72 };
-                c + Vec2::from_angle(a) * r
-            })
-            .collect();
-        gizmos.linestrip_2d(ghost, dim(mc, 0.22));
+        let kind = boss_kind(wave.level + 1);
+        let col = dim(boss_kind_color(kind), 0.22);
+        let r = BOSS_R * 1.5;
+        match kind {
+            BossKind::Warden => {
+                let ghost: Vec<Vec2> = (0..=20).map(|k| {
+                    let a = k as f32 / 20.0 * TAU + t * 0.3;
+                    c + Vec2::from_angle(a) * r * if k % 2 == 0 { 1.0 } else { 0.72 }
+                }).collect();
+                gizmos.linestrip_2d(ghost, col);
+            }
+            BossKind::Devourer => {
+                let ghost: Vec<Vec2> = (0..=18).map(|k| {
+                    let a = k as f32 / 18.0 * TAU + t * 0.2;
+                    c + Vec2::from_angle(a) * r * (0.82 + 0.18 * (a * 3.0).sin())
+                }).collect();
+                gizmos.linestrip_2d(ghost, col);
+            }
+            BossKind::Slinger => {
+                // the gunship dart, drifting nose-first (nose = +X, its travel direction)
+                let s = r * 0.8;
+                let p = |x: f32, y: f32| c + Vec2::new(x, y);
+                gizmos.linestrip_2d(
+                    [p(1.35 * s, 0.0), p(0.25 * s, 0.62 * s), p(-0.9 * s, 0.5 * s), p(-0.55 * s, 0.0), p(-0.9 * s, -0.5 * s), p(0.25 * s, -0.62 * s), p(1.35 * s, 0.0)],
+                    col,
+                );
+                gizmos.line_2d(p(0.6 * s, 0.0), p(1.7 * s, 0.0), col); // cannon barrel
+            }
+        }
     }
 
     for (boss, bt) in &bosses {
@@ -6453,6 +6520,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        app.insert_resource(Wave { level: 1, timer: WAVE_SECS, calm: 0.0 }); // not a boss run-up
         let big = |x: f32| (Asteroid { size: 3, verts: vec![Vec2::X * 88.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 }, Velocity(Vec2::ZERO), Transform::from_xyz(x, 0.0, 0.0));
         let rock1 = app.world_mut().spawn(big(200.0)).id();
         let rock2 = app.world_mut().spawn(big(-200.0)).id();
@@ -6473,6 +6542,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_event::<SoundFx>();
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        app.insert_resource(Wave { level: 1, timer: WAVE_SECS, calm: 0.0 });
         let rr = asteroid_radius(3);
         let rock = app
             .world_mut()
@@ -6495,6 +6566,8 @@ mod tests {
             let mut app = App::new();
             app.add_plugins(MinimalPlugins);
             app.add_event::<SoundFx>();
+            app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+            app.insert_resource(Wave { level: 1, timer: WAVE_SECS, calm: 0.0 });
             let rr = asteroid_radius(3);
             let rock = app
                 .world_mut()
@@ -6511,6 +6584,21 @@ mod tests {
         }
         assert_eq!(bullets_after(-0.1), 1, "popped out (timer elapsed) on a clear near-side lane → it fires");
         assert_eq!(bullets_after(1.0), 0, "still hiding (timer not elapsed) → it holds fire, never shooting through the rock");
+    }
+
+    #[test]
+    fn mobs_clear_off_when_a_boss_is_incoming() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_event::<SoundFx>();
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        app.insert_resource(Wave { level: 4, timer: 5.0, calm: 0.0 }); // last seconds before the wave-5 boss
+        // a stray limpet already off-screen → the boss-incoming flee branch clears it out
+        app.world_mut()
+            .spawn((Limpet { hp: 1, fire: 1.0, host: None, angle: 0.0, guard: Some(Vec2::X) }, Velocity(Vec2::ZERO), Transform::from_xyz(2000.0, 0.0, 0.0)));
+        app.add_systems(Update, limpet_update);
+        app.update();
+        assert_eq!(app.world_mut().query::<&Limpet>().iter(app.world()).count(), 0, "a stray mob clears off when a boss is incoming");
     }
 
     #[test]
@@ -7417,6 +7505,7 @@ mod tests {
         app.insert_resource(Stats::default());
         app.insert_resource(RunFlags::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        app.insert_resource(Wave { level: 1, timer: WAVE_SECS, calm: 0.0 }); // not a boss run-up (flee is via lifetime)
         // entered, out of life, already past the far edge → the flee branch despawns it
         app.world_mut().spawn((
             Enemy { fire: 5.0, life: 0.0, strafe: 1.0, entered: true, fleeing: true },
