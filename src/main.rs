@@ -5973,15 +5973,33 @@ fn dev_toggle(keys: Res<ButtonInput<KeyCode>>, mut dev: ResMut<Dev>) {
     }
 }
 
-// DEV: F2 skips to the next wave — kills the boss on a boss wave (so it advances via
-// the normal death path), otherwise just expires the timer. Debug builds only.
+// DEV: F2 skips to the next wave — on a boss wave it kills whichever boss is present (so it advances
+// via that boss's normal death path); otherwise it expires the timer. Handles ALL boss types (Warden /
+// Devourer / Slinger), so you can always skip past a boss without fighting it. Debug builds only.
 #[cfg(debug_assertions)]
-fn dev_wave_skip(keys: Res<ButtonInput<KeyCode>>, mut wave: ResMut<Wave>, mut bosses: Query<&mut Boss>) {
+fn dev_wave_skip(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut wave: ResMut<Wave>,
+    mut bosses: Query<&mut Boss>,
+    mut devourers: Query<&mut Devourer>,
+    mut slingers: Query<&mut Slinger>,
+) {
     if keys.just_pressed(KeyCode::F2) {
+        let mut killed = false;
         if let Some(mut b) = bosses.iter_mut().next() {
             b.hp = 0;
-        } else {
-            wave.timer = 0.0;
+            killed = true;
+        }
+        if let Some(mut d) = devourers.iter_mut().next() {
+            d.hp = 0;
+            killed = true;
+        }
+        if let Some(mut s) = slingers.iter_mut().next() {
+            s.hp = 0;
+            killed = true;
+        }
+        if !killed {
+            wave.timer = 0.0; // a normal wave → just expire the survival timer
         }
         info!("DEV skip → next wave");
     }
