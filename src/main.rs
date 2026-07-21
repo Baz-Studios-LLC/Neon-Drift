@@ -260,10 +260,13 @@ fn limpet_color() -> Color {
 } // cold cyan — the Limpet parasite (balanced green+blue reads apart from the blue rocks it clings to)
 
 fn mine_target(level: i32, asteroids: i32) -> i32 {
-    if level < MINE_FIRST_WAVE {
+    // key on content_wave so the 16+ loop resets mine density like rocks/enemies do (raw `level` would
+    // keep it pinned at the fraction cap forever). Identical for waves 1-15 (content_wave == level).
+    let cw = content_wave(level);
+    if cw < MINE_FIRST_WAVE {
         return 0;
     }
-    let raw = (level - MINE_FIRST_WAVE + 1) * MINE_PER_WAVE;
+    let raw = (cw - MINE_FIRST_WAVE + 1) * MINE_PER_WAVE;
     raw.min((asteroids as f32 * MINE_MAX_FRACTION) as i32)
 }
 
@@ -708,6 +711,8 @@ struct ScoreText; // top-left "SCORE n"
 #[derive(Component)]
 struct WaveBannerText; // big center-screen "WAVE n" flash that fades out
 #[derive(Component)]
+struct CalmCountdownText; // "NEXT WAVE IN n" — the visual countdown during the post-boss calm
+#[derive(Component)]
 struct ShotModeText; // bottom-center "MASS/STANDARD SHOT" label, fades after a Q toggle
 
 // Warp: a slow missile that tears open a black hole which drags in + consumes rocks.
@@ -1006,6 +1011,27 @@ fn spawn_hud(mut commands: Commands) {
                 Text::new(""),
                 TextFont { font_size: 66.0, ..default() },
                 TextColor(Color::srgba(0.8, 0.9, 1.3, 0.0)),
+            ));
+        });
+    // post-boss countdown to the next wave (shown during the 10s calm, below the WAVE banner)
+    commands
+        .spawn((
+            Hud,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Percent(57.0),
+                left: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
+        .with_children(|p| {
+            p.spawn((
+                CalmCountdownText,
+                Text::new(""),
+                TextFont { font_size: 32.0, ..default() },
+                TextColor(Color::srgba(0.72, 0.85, 1.15, 0.0)),
             ));
         });
     // shot-mode label (bottom-center, above the warp pips) — fades in/out on a Q toggle
@@ -3525,6 +3551,22 @@ fn wave_banner_update(
     }
 }
 
+// The post-boss calm's visual countdown: "NEXT WAVE IN n", ticking while wave.calm > 0 (the next
+// wave's number is already in wave.level). Pulses brighter within each second so it reads as a ticking
+// clock. Only bosses set `calm`, so this only appears in the 10s lull after a boss.
+fn calm_countdown_update(wave: Res<Wave>, mut q: Query<(&mut Text, &mut TextColor), With<CalmCountdownText>>) {
+    for (mut text, mut color) in &mut q {
+        if wave.calm > 0.0 {
+            let secs = wave.calm.ceil().max(1.0) as i32;
+            text.0 = format!("NEXT WAVE IN {secs}");
+            let pulse = 0.7 + 0.3 * wave.calm.fract(); // brightest just after each tick, easing down
+            color.0 = Color::srgb(0.72, 0.85, 1.15).with_alpha(pulse);
+        } else {
+            color.0 = color.0.with_alpha(0.0);
+        }
+    }
+}
+
 // Tick the HUD flash timers (pips/lives) set at their events.
 fn hud_flash_tick(time: Res<Time>, mut flash: ResMut<HudFlash>) {
     let dt = time.delta_secs();
@@ -5349,7 +5391,7 @@ fn main() {
         .init_state::<GameState>()
         .add_systems(Startup, (setup, spawn_hud, spawn_toast_root, load_progress, load_high_scores, start_music, start_sfx, set_window_icon))
         // always: keep the arena sized, handle pause input, refresh the HUD text
-        .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update).chain())
+        .add_systems(Update, (update_arena, pause_toggle, update_wave_text, update_score_text, wave_banner_update, calm_countdown_update).chain())
         // always: watch for achievement unlocks + age out toasts + hide the HUD off-run + menu buttons
         .add_systems(Update, (achievements, toast_update, hud_visibility, button_shimmer, button_click, hud_flash_tick, shot_mode_update))
         // the neon warm-up + frame pulse is a START-MENU flourish only (not the achievements screen)
@@ -6510,6 +6552,8 @@ mod tests {
         assert_eq!(mine_target(1, 10), 0, "no mines before wave 2");
         assert_eq!(mine_target(2, 10), 2, "wave 2: (2-2+1)*2 = 2, under the 50%-of-10 cap");
         assert_eq!(mine_target(5, 4), 2, "capped at 50% of 4 asteroids");
+        assert_eq!(mine_target(16, 100), 0, "loop: wave 16 = content 1 → no mines (not pinned at the cap)");
+        assert_eq!(mine_target(17, 100), 2, "loop: wave 17 = content 2 → back to 2");
     }
 
     #[test]
