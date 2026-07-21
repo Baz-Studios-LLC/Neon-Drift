@@ -2158,7 +2158,9 @@ fn collisions(
                 commands.entity(be).despawn(); // bullet is spent either way
                 a.hp -= power;
                 if a.hp > 0 {
-                    burst(&mut commands, ap, dense_color(), 6, 160.0, &mut rng); // dense rock cracks but holds
+                    // a hit that doesn't break it yet: white sparks off a pulser, green off a dense rock
+                    let spark = if pulser.is_some() { Color::srgb(4.5, 4.8, 5.6) } else { dense_color() };
+                    burst(&mut commands, ap, spark, 6, 160.0, &mut rng);
                 } else {
                     dead_a.insert(ae);
                     if explosive.is_some() {
@@ -2412,9 +2414,12 @@ fn top_up_asteroids(
 // The post-boss calm is a clean breather (and the pickup window): keep the field empty by
 // despawning any leftover asteroids/mines — including the boss's scattered shield — for its whole
 // duration. New spawns are already gated (top-ups bail while `calm > 0`).
-fn clear_calm_field(wave: Res<Wave>, mut commands: Commands, junk: Query<Entity, Or<(With<Asteroid>, With<Mine>)>>) {
+fn clear_calm_field(wave: Res<Wave>, mut commands: Commands, junk: Query<(Entity, &Transform), Or<(With<Asteroid>, With<Mine>)>>) {
     if wave.calm > 0.0 {
-        for e in &junk {
+        let mut rng = rand::thread_rng();
+        for (e, t) in &junk {
+            // dissolve with a soft puff instead of a silent vanish (the arena "resets" for the reward)
+            burst(&mut commands, t.translation.truncate(), Color::srgb(2.2, 2.8, 4.2), 9, 175.0, &mut rng);
             commands.entity(e).despawn();
         }
     }
@@ -3116,11 +3121,12 @@ fn boss_director(
     arena: Res<Arena>,
     mut state: ResMut<BossState>,
     mut enemies: Query<&mut Enemy>,
-    field: Query<Entity, (With<Asteroid>, Without<Cannonball>)>,
+    field: Query<(Entity, &Transform), (With<Asteroid>, Without<Cannonball>)>,
 ) {
     if !is_boss_wave(wave.level) || state.fought == wave.level {
         return;
     }
+    let mut rng = rand::thread_rng();
     state.fought = wave.level;
     if is_devourer_wave(wave.level) {
         // Boss 2: the devourer starts small in the upper arena and hunts free rocks to grow.
@@ -3133,7 +3139,8 @@ fn boss_director(
         // Clear the field for a clean "boss + green only" slate — the Slinger makes its own cannonballs
         // and doesn't use field rocks, so leftovers from wave 14 would just clutter the fight (and
         // top_up only ADDS, never trims). top_up then streams the sparse SLINGER_WAVE_ROCKS back in.
-        for a in &field {
+        for (a, at) in &field {
+            burst(&mut commands, at.translation.truncate(), Color::srgb(2.2, 2.8, 4.2), 9, 175.0, &mut rng); // dissolve as the Slinger sweeps in
             commands.entity(a).despawn();
         }
         commands.spawn((
