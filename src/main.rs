@@ -182,6 +182,15 @@ const PICKUP_R: f32 = 30.0; // reward-orb radius
 const PICKUP_DRIFT: f32 = 32.0; // px/s slow drift
 const PICKUP_LIFE: f32 = 20.0; // the orb lingers this long (well past the 10s boss calm) before vanishing
 
+// The Drone (boss-3 reward): an ally that orbits the ship a short distance out and auto-plinks the
+// nearest asteroid in range — cleaning up rocks the player left behind. Fires the player's own Bullet.
+const DRONE_R: f32 = 9.0;
+const DRONE_FOLLOW_DIST: f32 = 64.0; // how far it orbits from the ship (a short leash)
+const DRONE_ORBIT_RATE: f32 = 0.9; // rad/s — a slow circle around the ship
+const DRONE_FOLLOW_GAIN: f32 = 6.0; // how snappily it chases its orbit point (lerp/s)
+const DRONE_RANGE: f32 = 380.0; // only targets asteroids within this of the drone
+const DRONE_FIRE_EVERY: f32 = 1.0; // s between shots — an assist, not a firehose
+
 const MAX_SEP: f32 = 6.0; // px/frame cap on overlap push-out
 const RESTITUTION: f32 = 1.0; // fully elastic bounce
 const MIN_DRIFT: f32 = 30.0; // px/s — rocks never fully stop (elastic hits can zero them → "stuck")
@@ -277,6 +286,9 @@ fn slinger_color() -> Color {
     Color::srgb(0.9, 2.2, 5.2)
 } // cold electric ICE-BLUE — the Slinger gunship (boss 3); a unique boss hue, clearly apart from the
   // Warden's magenta + Devourer's red, and no blue rocks exist on its wave to confuse it with
+fn drone_color() -> Color {
+    Color::srgb(2.6, 2.2, 5.6)
+} // lavender-violet — the ally Drone (player kit, so it reads as yours; distinct from the ship's core purple)
 fn limpet_color() -> Color {
     Color::srgb(0.4, 3.6, 4.2)
 } // cold cyan — the Limpet parasite (balanced green+blue reads apart from the blue rocks it clings to)
@@ -499,7 +511,7 @@ type GameplayEntity = Or<(
     With<Slinger>,
     // (Cannonball entities are also Asteroids, so With<Asteroid> already covers them.)
     // Nested Or keeps this within Bevy's 15-element tuple-filter limit.
-    Or<(With<ChainShot>, With<Pickup>)>,
+    Or<(With<ChainShot>, With<Pickup>, With<Drone>)>,
 )>;
 
 #[derive(Component)]
@@ -699,11 +711,20 @@ struct ChainShot {
     perp: Vec2,
 }
 
-// Which weapon a reward orb unlocks. Chain drops after boss 1, mass shot after boss 2.
+// Which weapon a reward orb unlocks. Chain drops after boss 1, mass shot after boss 2, drone after boss 3.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PickupKind {
     Chain,
     Mass,
+    Drone,
+}
+
+// An ally drone (boss-3 reward): orbits the ship a short distance out and auto-fires at the nearest
+// asteroid in range. Spawned when the Drone pickup is collected; one per run.
+#[derive(Component)]
+struct Drone {
+    fire: f32,  // cooldown to the next shot
+    angle: f32, // orbit phase around the ship
 }
 
 // The reward orb that drifts in the calm after a boss — fly into it (or shoot it) to unlock the
@@ -3490,6 +3511,7 @@ fn pickup_update(
     ships: Query<&Transform, With<Ship>>,
     bullets: Query<(Entity, &Transform), With<Bullet>>,
     mut pickups: Query<(Entity, &Transform, &mut Velocity, &mut Pickup)>,
+    drones: Query<(), With<Drone>>,
 ) {
     let dt = time.delta_secs();
     let h = arena.half;
@@ -3533,9 +3555,65 @@ fn pickup_update(
                     mass.active = true; // switch to it on grab; Q toggles back to the standard shot
                     mass_color()
                 }
+                PickupKind::Drone => {
+                    // spawn the ally drone once — it starts at the ship (or the orb) and follows from there
+                    if drones.is_empty() {
+                        let at = ship.unwrap_or(p);
+                        commands.spawn((Drone { fire: DRONE_FIRE_EVERY, angle: 0.0 }, Transform::from_xyz(at.x, at.y, 0.0)));
+                    }
+                    drone_color()
+                }
             };
             burst(&mut commands, p, col, 30, 300.0, &mut rng);
             commands.entity(pe).despawn();
+        }
+    }
+}
+
+// The ally Drone: orbits the ship a short distance out and auto-fires the player's Bullet at the
+// nearest asteroid in range — mopping up rocks left behind. Its position is driven directly (it
+// doesn't need physics); if the ship is gone (mid-respawn) it just idles in place.
+fn drone_update(
+    time: Res<Time>,
+    mut commands: Commands,
+    ships: Query<&Transform, (With<Ship>, Without<Drone>)>,
+    rocks: Query<&Transform, (With<Asteroid>, Without<Drone>)>,
+    mut drones: Query<(&mut Transform, &mut Drone)>,
+) {
+    let dt = time.delta_secs();
+    let ship = ships.iter().next().map(|t| t.translation.truncate());
+    for (mut dtf, mut dr) in &mut drones {
+        let dc = dtf.translation.truncate();
+        dr.angle += dt * DRONE_ORBIT_RATE;
+        // follow: ease toward an orbit point a short distance from the ship (a trailing wingman)
+        if let Some(sp) = ship {
+            let target = sp + Vec2::from_angle(dr.angle) * DRONE_FOLLOW_DIST;
+            let k = (DRONE_FOLLOW_GAIN * dt).min(1.0);
+            dtf.translation.x += (target.x - dc.x) * k;
+            dtf.translation.y += (target.y - dc.y) * k;
+        }
+        // fire at the nearest asteroid in range on a cooldown
+        dr.fire -= dt;
+        if dr.fire <= 0.0 {
+            let mut best: Option<(Vec2, f32)> = None;
+            for rt in &rocks {
+                let rp = rt.translation.truncate();
+                let d = rp.distance_squared(dc);
+                if d < DRONE_RANGE * DRONE_RANGE && best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((rp, d));
+                }
+            }
+            if let Some((rp, _)) = best {
+                let dir = (rp - dc).normalize_or_zero();
+                if dir != Vec2::ZERO {
+                    commands.spawn((
+                        Bullet { life: BULLET_LIFE, trail: Vec::new(), mass: false },
+                        Velocity(dir * BULLET_SPEED),
+                        Transform::from_xyz(dc.x, dc.y, 0.0),
+                    ));
+                    dr.fire = DRONE_FIRE_EVERY;
+                }
+            }
         }
     }
 }
@@ -4186,7 +4264,13 @@ fn slinger_update(
                     commands.entity(a).despawn(); // its loaded round goes with it
                 }
                 commands.entity(se).despawn();
-                // TODO: drop the Drone pickup here once that pickup is built (Slinger = content wave 15).
+                // drop the Drone orb (the boss-3 reward, content wave 15)
+                let pdir = Vec2::from_angle(rng.gen_range(0.0..TAU));
+                commands.spawn((
+                    Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE, kind: PickupKind::Drone },
+                    Velocity(pdir * PICKUP_DRIFT),
+                    Transform::from_xyz(0.0, 0.0, 0.0),
+                ));
                 defeat_boss(&mut score, &mut wave, &mut banner);
             }
             continue;
@@ -4491,6 +4575,7 @@ fn render_extras(
     time: Res<Time>,
     chains: Query<(&Transform, &ChainShot)>,
     pickups: Query<(&Transform, &Pickup)>,
+    drones: Query<(&Drone, &Transform)>,
 ) {
     let t = time.elapsed_secs();
     let cc = chain_color();
@@ -4521,12 +4606,22 @@ fn render_extras(
         let col = match pk.kind {
             PickupKind::Chain => cc,
             PickupKind::Mass => mass_color(),
+            PickupKind::Drone => drone_color(),
         };
         let hex: Vec<Vec2> = (0..=6)
             .map(|i| c + Vec2::from_angle(i as f32 / 6.0 * TAU + pk.rot) * PICKUP_R * throb)
             .collect();
         gizmos.linestrip_2d(hex, col);
         gizmos.circle_2d(Isometry2d::from_translation(c), PICKUP_R * 0.3 * throb, white);
+    }
+    // the ally drone — a small spinning violet craft with a bright core
+    let dcol = drone_color();
+    for (dr, dtf) in &drones {
+        let c = dtf.translation.truncate();
+        let spin = dr.angle * 2.0 + t * 3.0;
+        let tri: Vec<Vec2> = (0..=3).map(|i| c + Vec2::from_angle(spin + i as f32 / 3.0 * TAU) * DRONE_R).collect();
+        gizmos.linestrip_2d(tri, dcol);
+        gizmos.circle_2d(Isometry2d::from_translation(c), DRONE_R * 0.4, white);
     }
 }
 
@@ -5809,6 +5904,7 @@ fn main() {
                     shield_deflect,
                     chain_update,
                     pickup_update,
+                    drone_update,
                     respawn,
                 )
                     .chain(),
@@ -7823,6 +7919,37 @@ mod tests {
         assert!(app.world().resource::<Chain>().unlocked, "flying into the orb unlocks the chain shot");
         assert_eq!(app.world().resource::<Chain>().charges, CHAIN_MAX_CHARGES, "and fills its charges");
         assert_eq!(app.world_mut().query::<&Pickup>().iter(app.world()).count(), 0, "the orb is consumed");
+    }
+
+    #[test]
+    fn pickup_spawns_the_ally_drone() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        app.insert_resource(Chain::default());
+        app.insert_resource(MassShot::default());
+        app.world_mut().spawn((Ship { angle: 0.0, cooldown: 0.0, invuln: 0.0, flame: 0.0 }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Pickup { rot: 0.0, pulse: 0.0, life: PICKUP_LIFE, kind: PickupKind::Drone }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.add_systems(Update, pickup_update);
+        app.update();
+        assert_eq!(app.world_mut().query::<&Drone>().iter(app.world()).count(), 1, "collecting the drone orb spawns one ally drone");
+        assert!(app.world().resource::<RunFlags>().powerup_used, "and counts as a powerup used (blocks Purist)");
+    }
+
+    #[test]
+    fn the_drone_fires_at_a_nearby_asteroid() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.world_mut().spawn((Ship { angle: 0.0, cooldown: 0.0, invuln: 0.0, flame: 0.0 }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((Drone { fire: -0.1, angle: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0))); // primed to fire
+        app.world_mut()
+            .spawn((Asteroid { size: 3, verts: vec![Vec2::X * 88.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 }, Velocity(Vec2::ZERO), Transform::from_xyz(150.0, 0.0, 0.0)));
+        app.add_systems(Update, drone_update);
+        app.update();
+        assert_eq!(app.world_mut().query::<&Bullet>().iter(app.world()).count(), 1, "the drone auto-fires at a nearby asteroid");
     }
 
     #[test]

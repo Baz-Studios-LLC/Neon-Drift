@@ -70,7 +70,7 @@ Each boss drops a powerup that echoes its own mechanic.
 | --- | --- | --- | --- |
 | Warden (W5) | **Chain Shot** | ✅ | beam arcs/*links* between rocks — the Warden links rocks on its arms |
 | Glutton (W10) | **Mass Shot** | ✅ | heavier, high-*mass* rounds — the red Glutton gains mass |
-| Slinger (W15) | **Drone** | 🔷 | an ally *ship* that seeks & fires for you — mirrors the enemy ship |
+| Slinger (W15) | **Drone** | ✅ | an ally craft that orbits the ship a short distance out and auto-fires the player's Bullet at the nearest asteroid in range — mops up rocks you left behind (one per run) |
 | Detonator (W20) | **Warhead rounds** | 🔷 | your shots detonate & chain — echoes the primed bombs |
 | Pulsar (W25) | **Nova pulse** | 🔷 | a shockwave that shoves rocks away — echoes its pulse |
 | Singularity (W30) | **Magnet** | 🔷 | pulls pickups/small rocks in — echoes its gravity (base Warp stays core kit) |
@@ -107,10 +107,11 @@ the rock mix lives in `roll_rock_kind` (orange fraction ~0.25 on waves 11–13, 
 | 12 | Limpet (new mob) + orange | orange wired ✅ · Limpet ✅ (core) |
 | 13 | green + orange + Limpets (as 12) | orange/green wired ✅ · Limpet ✅ (core) |
 | 14 | orange only | wired ✅ |
-| 15 | **The Slinger** (boss) + green only | green wired ✅ · Slinger ✅ (Drone drop TODO) |
+| 15 | **The Slinger** (boss) + green only | green wired ✅ · Slinger ✅ · Drone drop ✅ |
 
 Build order (one section at a time): **1. orange mechanic ✅ → 2. wave restructure + orange/green
-wiring ✅ (§A) → 3. Limpet mob ✅ core (§B) → 4. Slinger boss ✅ (§C) → 5. Slinger's Drone powerup.**
+wiring ✅ (§A) → 3. Limpet mob ✅ core (§B) → 4. Slinger boss ✅ (§C) → 5. Slinger's Drone powerup ✅.**
+Waves 1–15 are content-complete — hold here for deep playtesting (reach 15 without dev mode).
 
 The Slinger (§C, ✅): boss 3, wave 15 — a large **ice-blue gunship** (its nose/cannon tracks the
 player; unique boss colour, apart from the Warden's magenta + Devourer's red). Glides in, then hovers
@@ -121,7 +122,9 @@ at the ship at `SLINGER_CANNON_SPEED`; grabs every `SLINGER_COOL`s. Because its 
 Grabs refill from the field (`top_up`) so it never runs dry; a launched round despawns off-screen. Its
 wave runs a **sparse field** (`SLINGER_WAVE_ROCKS`, the beam's ammo reservoir), cleared when it arrives
 (clean green-only slate — the Warden/Devourer keep their rocks). Exposed core (`SLINGER_HP`, no shield).
-**TODO:** drop the Drone pickup on death (currently just advances). Rule of thumb going forward: **each
+On death it drops the **Drone** pickup (`DRONE_*`): an ally that orbits the ship (`DRONE_FOLLOW_DIST`)
+and auto-fires the player's Bullet at the nearest asteroid within `DRONE_RANGE` — one per run, cleared
+on a field wipe. Rule of thumb going forward: **each
 boss gets a unique colour** (Warden magenta · Devourer red · Slinger ice-blue).
 
 The Limpet (§B, ✅ core): a cyan parasite that TETHERS to a large rock — it rigidly rides the rim
