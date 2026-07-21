@@ -2455,7 +2455,8 @@ fn warp_missile_update(
     time: Res<Time>,
     arena: Res<Arena>,
     mut q: Query<(Entity, &Transform, &Velocity, &mut WarpMissile)>,
-    rocks: Query<(&Transform, &Asteroid), Without<Gold>>, // gold is skipped — the warp shouldn't grief the 1UP
+    rocks: Query<(&Transform, &Asteroid)>, // gold INCLUDED: warping the 1UP is a valid player action — the
+    // missile detonates on it and the hole consumes the lineage, so gold_rush_update grants the life
 ) {
     let dt = time.delta_secs();
     let h = arena.half;
@@ -6046,6 +6047,31 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<Run>().lives, 2, "clearing the whole gold lineage restores +1 life");
         assert!(!app.world().resource::<GoldRush>().active, "the hunt resets after granting (grants once)");
+    }
+
+    #[test]
+    fn warping_the_gold_rock_grants_the_life() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_event::<SoundFx>();
+        app.insert_resource(Score(0));
+        app.insert_resource(GoldRush { active: true, forfeited: false, cooldown: 0.0 });
+        app.insert_resource(HudFlash::default());
+        app.insert_resource(Run { lives: LIFE_CAP - 1, respawn: 0.0 });
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        // a gold rock sitting on an open hole → the warp swallows it (a player action, so it should pay out)
+        app.world_mut().spawn((BlackHole { life: 5.0, spin: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.world_mut().spawn((
+            Asteroid { size: 3, verts: vec![Vec2::X * 88.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 },
+            Velocity(Vec2::ZERO),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            Gold,
+        ));
+        app.add_systems(Update, (black_hole_update, gold_rush_update));
+        app.update();
+        app.update();
+        assert_eq!(app.world_mut().query_filtered::<(), With<Gold>>().iter(app.world()).count(), 0, "the warp swallows the gold rock");
+        assert_eq!(app.world().resource::<Run>().lives, LIFE_CAP, "warping the whole gold lineage grants +1 life — the warp is a player action");
     }
 
     #[test]

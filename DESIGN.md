@@ -145,7 +145,8 @@ recoverable, but only by earning them, via a rare gold asteroid. ✅ Implemented
   `GOLD_INITIAL_DELAY` graces the run start. Any wave, boss waves included (the Devourer won't eat it;
   a rock the Warden grabs is just shot off its shield).
 - You must **destroy the whole gold lineage** — the rock *and* every gold fragment (gold-ness is
-  inherited through every break: bullet, chain, mine) — to claim **+1 life**. `GoldRush` tracks it.
+  inherited through every break: bullet or chain) — to claim **+1 life**. `GoldRush` tracks it. The
+  **warp counts too** (it's a player action): a hole that swallows the entire lineage grants the life.
 - **Long grace, then forfeit.** Gold fragments carry a long grace (`GOLD_GRACE`) during which they
   recycle rather than being culled — so a shot gold never vanishes *immediately*, you get a fair
   window to catch every piece. After the grace, a piece that drifts off-screen IS culled and latches
@@ -155,9 +156,10 @@ recoverable, but only by earning them, via a rare gold asteroid. ✅ Implemented
 - **Telegraph:** a single shimmering gold outline (same shape/chunkiness as any rock — the pulsing
   colour is what marks it); clearing it pops an "EXTRA LIFE" toast + a distinct 1UP jingle
   (`life_sfx_wav`, separate from the achievement chime).
-- **Only player shots break it.** Mine blasts spare gold rocks, and a drifting mine bounces off one
-  instead of detonating — so a mine can't clear the lineage for you. The **Devourer** won't eat gold
-  either (both would hand over a 1UP the player didn't earn).
+- **Only player actions claim it** (shots, the chain beam, and the **warp** — the warp missile detonates
+  on gold and the hole swallows it, paying out the life). Mine blasts spare gold rocks, and a drifting
+  mine bounces off one instead of detonating — so a mine can't clear the lineage for you. The
+  **Devourer** won't eat gold either (both would hand over a 1UP the player didn't earn).
 
 Considered and shelved (could layer on later): score extends, boss-clear +1, perfect-wave meter.
 
