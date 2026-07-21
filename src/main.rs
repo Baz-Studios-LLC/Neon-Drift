@@ -140,6 +140,20 @@ const BOSS_CALM: f32 = 10.0; // s post-kill lull before the next wave (the picku
 const BOSS_SCORE: u32 = 3000;
 const BOSS_CAMEO_SECS: f32 = 10.0; // boss drifts by in the background this long before its wave
 
+// The Slinger (boss 3, wave 15): a long-range gunner that hovers across the arena, LOADS a big rock in
+// front of itself (a charging telegraph), then LAUNCHES it at you like a cannonball. Counterplay: dodge
+// the shot, or shoot the loaded rock before it fires ("break its ammo"). Its core is always exposed —
+// a straight duel of chipping its HP while dodging. Drops the Drone (wired when the pickup is built).
+const SLINGER_HP: i32 = 24; // core hits to kill (no shield — you just have to survive the barrage)
+const SLINGER_R: f32 = 34.0;
+const SLINGER_SPEED: f32 = 155.0; // hover reposition speed (stays across the arena from the ship)
+const SLINGER_ENTER_SPEED: f32 = 340.0; // glide-in from the top
+const SLINGER_INTRO: f32 = 1.2; // invulnerable power-up after entering
+const SLINGER_COOL: f32 = 1.6; // s after a launch before it loads the next round
+const SLINGER_LOAD: f32 = 1.1; // s the cannonball charges in front of it — the window to shoot its ammo
+const SLINGER_CANNON_SPEED: f32 = 640.0; // px/s of a launched cannonball — fast; must be dodged
+const SLINGER_DEATH_SECS: f32 = 2.2; // slow death animation before it despawns
+
 // Boss 2 — the devourer (wave 10): a red seeker that eats rocks to grow + heal.
 const DEVOURER_HP: i32 = 70; // core HP; it STARTS full — the bar reads 100% at the start (much tankier than the shaman's 28)
 const DEVOURER_HP_MAX: i32 = DEVOURER_HP; // heal cap == starting HP: eating heals DAMAGE back toward full, never past it (it grows in SIZE, not in max HP)
@@ -255,6 +269,9 @@ fn gold_color() -> Color {
 fn orange_color() -> Color {
     Color::srgb(6.0, 2.0, 0.25)
 } // hot orange — explosive asteroids (high R, low B; distinct from the yellow enemy)
+fn slinger_color() -> Color {
+    Color::srgb(6.0, 1.5, 0.55)
+} // hot red-orange artillery glow — the Slinger (boss 3); distinct on its green-only wave
 fn limpet_color() -> Color {
     Color::srgb(0.4, 3.6, 4.2)
 } // cold cyan — the Limpet parasite (balanced green+blue reads apart from the blue rocks it clings to)
@@ -468,8 +485,10 @@ type GameplayEntity = Or<(
     With<Shockwave>,
     With<Boss>,
     With<Devourer>,
-    With<ChainShot>,
-    With<Pickup>,
+    With<Slinger>,
+    // (Cannonball entities are also Asteroids, so With<Asteroid> already covers them.)
+    // Nested Or keeps this within Bevy's 15-element tuple-filter limit.
+    Or<(With<ChainShot>, With<Pickup>)>,
 )>;
 
 #[derive(Component)]
@@ -584,6 +603,27 @@ struct Devourer {
 // A rock the boss just hurled — briefly un-grabbable so it can't be re-captured instantly.
 #[derive(Component)]
 struct Thrown(f32);
+
+// Boss 3 (wave 15): the Slinger — a gunner that loads a rock and fires it at the ship like a cannonball.
+#[derive(Component)]
+struct Slinger {
+    hp: i32,
+    entered: bool,        // finished gliding in
+    charge: f32,          // > 0 = intro power-up (invulnerable)
+    cool: f32,            // countdown to loading the next round
+    load: f32,            // > 0 while a cannonball charges in front of it; launches at 0
+    ammo: Option<Entity>, // the loaded cannonball (a `Cannonball`-tagged asteroid)
+    pulse: f32,
+    dying: f32,           // > 0 → death animation counting down; despawns at 0
+}
+
+// The Slinger's loaded/launched projectile — a large asteroid it charges then fires. Reuses the rock
+// systems (bullets can shatter it to disarm; it kills the ship on contact) but despawns off-screen
+// instead of recycling like a normal rock.
+#[derive(Component)]
+struct Cannonball {
+    launched: bool,
+}
 
 // A freshly-broken fragment during its grace window: while this timer runs it recycles at the edges
 // instead of being culled, so a rock shattered right at the border can't lose its pieces off-screen
@@ -889,6 +929,9 @@ fn content_wave(level: i32) -> i32 {
 // Boss waves alternate: content-10 = the devourer (boss 2); content-5 = the shaman (boss 1).
 fn is_devourer_wave(level: i32) -> bool {
     is_boss_wave(level) && content_wave(level) == 10
+}
+fn is_slinger_wave(level: i32) -> bool {
+    is_boss_wave(level) && content_wave(level) == 15
 }
 fn devourer_radius(grow: f32) -> f32 {
     DEVOURER_BASE_R + grow.clamp(0.0, 1.0) * (DEVOURER_MAX_R - DEVOURER_BASE_R)
@@ -1814,11 +1857,11 @@ fn ship_bounds(arena: Res<Arena>, mut q: Query<(&mut Transform, &mut Velocity), 
     }
 }
 
-fn asteroid_bounds(mut commands: Commands, time: Res<Time>, arena: Res<Arena>, mut rush: ResMut<GoldRush>, mut q: Query<(Entity, &mut Transform, &mut Velocity, &Asteroid, Option<&mut Fresh>, Option<&Gold>), Without<Shielded>>) {
+fn asteroid_bounds(mut commands: Commands, time: Res<Time>, arena: Res<Arena>, mut rush: ResMut<GoldRush>, mut q: Query<(Entity, &mut Transform, &mut Velocity, &Asteroid, Option<&mut Fresh>, Option<&Gold>, Option<&Cannonball>), Without<Shielded>>) {
     let h = arena.half;
     let dt = time.delta_secs();
     let mut rng = rand::thread_rng();
-    for (e, mut t, mut v, a, fresh, gold) in &mut q {
+    for (e, mut t, mut v, a, fresh, gold, cannon) in &mut q {
         // tick the post-break grace; while it runs the fragment is protected from culling below
         let mut grace = false;
         if let Some(mut f) = fresh {
@@ -1842,6 +1885,12 @@ fn asteroid_bounds(mut commands: Commands, time: Res<Time>, arena: Res<Arena>, m
         let r = asteroid_radius(a.size);
         let p = t.translation.truncate();
         if !(p.x < -h.x - r || p.x > h.x + r || p.y < -h.y - r || p.y > h.y + r) {
+            continue;
+        }
+        // a launched cannonball that misses just leaves for good — it must NOT recycle as a
+        // normal large rock (that would litter the arena with the Slinger's spent shots).
+        if cannon.is_some() {
+            commands.entity(e).despawn();
             continue;
         }
         // A rock that's fully drifted off-screen either leaves for good or recycles back in.
@@ -1913,6 +1962,7 @@ fn collisions(
     mut shield_rocks: Query<(Entity, &Transform, &mut Asteroid), With<Shielded>>,
     mut bosses: Query<(&Transform, &mut Boss)>,
     mut devourers: Query<(&Transform, &mut Devourer)>,
+    mut slingers: Query<(&Transform, &mut Slinger)>,
     mut score: ResMut<Score>,
     mut sfx: EventWriter<SoundFx>,
     mut stats: ResMut<Stats>,
@@ -2093,11 +2143,28 @@ fn collisions(
                 break;
             }
         }
+        if dead_b.contains(&be) {
+            continue;
+        }
+        // the Slinger (boss 3) takes gunfire directly — no shield; chip its core while dodging its shots
+        for (spos, mut sl) in &mut slingers {
+            if sl.charge > 0.0 || sl.dying > 0.0 {
+                continue; // invulnerable while entering / already dying
+            }
+            let rr = SLINGER_R + br;
+            if bp.distance_squared(spos.translation.truncate()) < rr * rr {
+                dead_b.insert(be);
+                commands.entity(be).despawn();
+                sl.hp -= power;
+                burst(&mut commands, bp, slinger_color(), 6, 180.0, &mut rng);
+                break;
+            }
+        }
     }
 }
 
-// 3-minute waves: survive the timer to advance; each new wave streams in more
-// rocks (up to the cap). (Boss waves will end on kill instead — added in a later step.)
+// Non-boss waves: survive the timer to advance; each new wave streams in more rocks (up to the cap).
+// Boss waves end on the kill instead (handled by each boss's update).
 fn wave_timer(
     time: Res<Time>,
     mut wave: ResMut<Wave>,
@@ -2811,6 +2878,12 @@ fn boss_director(
         commands.spawn((
             Devourer { hp: DEVOURER_HP, grow: 0.0, fed: 0, dying: 0.0, pulse: 0.0 },
             Transform::from_xyz(0.0, arena.half.y * 0.55, 0.0),
+        ));
+    } else if is_slinger_wave(wave.level) {
+        // Boss 3: the Slinger glides in from the top, then hovers across from the ship and fires rocks.
+        commands.spawn((
+            Slinger { hp: SLINGER_HP, entered: false, charge: SLINGER_INTRO, cool: SLINGER_COOL, load: 0.0, ammo: None, pulse: 0.0, dying: 0.0 },
+            Transform::from_xyz(0.0, arena.half.y + SLINGER_R, 0.0),
         ));
     } else {
         // Boss 1: the shield-shaman glides in from the top.
@@ -3993,6 +4066,139 @@ fn render(
     }
 }
 
+// The Slinger (boss 3, wave 15): glide in → hover up high, mirroring the ship's x → LOAD a cannonball
+// in front of itself (a charging telegraph you can shoot to disarm) → LAUNCH it fast at the ship. Its
+// core is always exposed: chip it down while dodging the barrage. Death → burst → reward calm → advance.
+#[allow(clippy::too_many_arguments)]
+fn slinger_update(
+    time: Res<Time>,
+    mut commands: Commands,
+    arena: Res<Arena>,
+    mut run: ResMut<Run>,
+    mut next: ResMut<NextState<GameState>>,
+    reward: (ResMut<Score>, ResMut<Wave>, ResMut<WaveBanner>), // bundled to stay under the 16-param limit
+    mut sfx: EventWriter<SoundFx>,
+    dev: Res<Dev>,
+    ships: Query<(Entity, &Transform, &Ship), Without<Slinger>>,
+    mut slingers: Query<(Entity, &mut Transform, &mut Slinger)>,
+    mut ammo_q: Query<(&mut Transform, &mut Velocity), (With<Cannonball>, Without<Slinger>, Without<Ship>)>,
+) {
+    let dt = time.delta_secs();
+    let (mut score, mut wave, mut banner) = reward;
+    let mut rng = rand::thread_rng();
+    let h = arena.half;
+    let ship = ships.iter().next();
+    let ship_pos = ship.map(|(_, t, _)| t.translation.truncate());
+    let aim_from = |from: Vec2| ship_pos.map(|s| (s - from).normalize_or_zero()).filter(|d| *d != Vec2::ZERO).unwrap_or(Vec2::NEG_Y);
+    for (se, mut st, mut sl) in &mut slingers {
+        let mut p = st.translation.truncate();
+        sl.pulse += dt * 4.0;
+
+        // ── DYING: crackle apart, then despawn → reward calm → advance the wave ──
+        if sl.dying > 0.0 {
+            sl.dying -= dt;
+            for _ in 0..3 {
+                let off = Vec2::from_angle(rng.gen_range(0.0..TAU)) * rng.gen_range(0.0..SLINGER_R);
+                burst(&mut commands, p + off, slinger_color(), 3, 240.0, &mut rng);
+            }
+            if sl.dying <= 0.0 {
+                burst(&mut commands, p, slinger_color(), 50, 460.0, &mut rng);
+                burst(&mut commands, p, Color::srgb(6.0, 4.0, 3.0), 24, 300.0, &mut rng);
+                if let Some(a) = sl.ammo.take() {
+                    commands.entity(a).despawn(); // its loaded round goes with it
+                }
+                commands.entity(se).despawn();
+                // TODO: drop the Drone pickup here once that pickup is built (Slinger = content wave 15).
+                defeat_boss(&mut score, &mut wave, &mut banner);
+            }
+            continue;
+        }
+        // ── core destroyed → begin dying ──
+        if sl.hp <= 0 {
+            sl.dying = SLINGER_DEATH_SECS;
+            burst(&mut commands, p, slinger_color(), 30, 320.0, &mut rng);
+            continue;
+        }
+
+        // ── ENTER: glide down into its hover band (invulnerable) ──
+        if !sl.entered {
+            p.y -= SLINGER_ENTER_SPEED * dt;
+            if p.y <= h.y * 0.55 {
+                p.y = h.y * 0.55;
+                sl.entered = true;
+            }
+            st.translation.x = p.x;
+            st.translation.y = p.y;
+            continue;
+        }
+        if sl.charge > 0.0 {
+            sl.charge -= dt; // intro power-up: invulnerable, not yet firing
+        }
+
+        // ── HOVER: stay up high, mirroring the ship's x, so its shots come down-and-across ──
+        let margin = SLINGER_R + 24.0;
+        let want = Vec2::new(
+            ship_pos.map(|s| -s.x).unwrap_or(0.0).clamp(-h.x + margin, h.x - margin),
+            (h.y * 0.5).min(h.y - margin),
+        );
+        p += (want - p).clamp_length_max(SLINGER_SPEED * dt);
+        st.translation.x = p.x;
+        st.translation.y = p.y;
+
+        if sl.charge > 0.0 {
+            continue; // no loading / firing during the intro power-up
+        }
+
+        // a loaded round that got shot out from under it → disarmed, reload
+        if sl.ammo.is_some_and(|a| ammo_q.get(a).is_err()) {
+            sl.ammo = None;
+            sl.load = 0.0;
+            sl.cool = SLINGER_COOL;
+        }
+        let barrel = SLINGER_R + asteroid_radius(3) + 6.0; // where the round sits, muzzle-forward
+        if sl.ammo.is_none() {
+            // cooling down, then load the next round
+            sl.cool -= dt;
+            if sl.cool <= 0.0 {
+                let load_pos = p + aim_from(p) * barrel;
+                let e = spawn_asteroid(&mut commands, load_pos, 3, Vec2::ZERO, &mut rng, false);
+                commands.entity(e).insert(Cannonball { launched: false });
+                sl.ammo = Some(e);
+                sl.load = SLINGER_LOAD;
+                sfx.write(SoundFx::EnemyShot); // charge cue
+            }
+        } else if let Some(a) = sl.ammo {
+            // charging: hold the round muzzle-forward (re-aimed at the ship); launch when the timer ends
+            sl.load -= dt;
+            if let Ok((mut at, mut av)) = ammo_q.get_mut(a) {
+                let hold = p + aim_from(p) * barrel;
+                at.translation.x = hold.x;
+                at.translation.y = hold.y;
+                av.0 = Vec2::ZERO;
+                if sl.load <= 0.0 {
+                    av.0 = aim_from(hold) * SLINGER_CANNON_SPEED; // FIRE at the ship's current spot
+                    commands.entity(a).insert(Cannonball { launched: true });
+                    sl.ammo = None;
+                    sl.cool = SLINGER_COOL;
+                    sfx.write(SoundFx::Mine); // launch thump
+                }
+            }
+        }
+
+        // ── its body is solid: ship contact kills (unless mid-respawn / invincible) ──
+        if run.respawn <= 0.0 {
+            if let Some((se2, stf, sh)) = ship {
+                if !immune(sh, &dev) {
+                    let spp = stf.translation.truncate();
+                    if p.distance(spp) < SLINGER_R + SHIP_R {
+                        kill_ship(&mut commands, &mut run, &mut next, &mut sfx, se2, spp, &mut rng);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Boss rendering, split out of `render` (it was at the 16-param system limit): the
 // background cameo telegraph, the magenta core (a jagged pulsing star, blinking while
 // it charges), and the octopus arms — curved tapering tentacles to each shield rock.
@@ -4005,6 +4211,8 @@ fn render_boss(
     bosses: Query<(&Boss, &Transform)>,
     shielded: Query<(&Transform, &Shielded)>,
     devourers: Query<(&Devourer, &Transform)>,
+    slingers: Query<(&Slinger, &Transform)>,
+    cannonballs: Query<(&Cannonball, &Transform)>,
 ) {
     let h = arena.half;
     let t = time.elapsed_secs();
@@ -4092,6 +4300,36 @@ fn render_boss(
         if boss.dying <= 0.0 {
             boss_hp_bar(&mut gizmos, h.y - 42.0, boss.hp as f32 / BOSS_HP as f32, mc);
         }
+    }
+
+    // ── the Slinger (boss 3): a chunky angular gun-platform; blinks while charging, shrinks while dying ──
+    let sc = slinger_color();
+    for (sl, sltf) in &slingers {
+        let c = sltf.translation.truncate();
+        let scale = if sl.dying > 0.0 { (sl.dying / SLINGER_DEATH_SECS).clamp(0.0, 1.0) } else { 1.0 };
+        let throb = 1.0 + 0.08 * sl.pulse.sin();
+        let blink = sl.charge > 0.0 || sl.dying > 0.0;
+        if !blink || ((sl.pulse * 3.0) as i32) % 2 == 0 {
+            let hull: Vec<Vec2> = (0..=6)
+                .map(|k| {
+                    let a = k as f32 / 6.0 * TAU + 0.4;
+                    c + Vec2::from_angle(a) * SLINGER_R * throb * scale
+                })
+                .collect();
+            gizmos.linestrip_2d(hull, sc);
+            gizmos.circle_2d(Isometry2d::from_translation(c), SLINGER_R * 0.42 * throb * scale, sc);
+        }
+        if sl.dying <= 0.0 {
+            boss_hp_bar(&mut gizmos, h.y - 42.0, sl.hp as f32 / SLINGER_HP as f32, sc);
+        }
+    }
+    // the Slinger's loaded/launched round: a hot pulsing ring over the rock so the charged shot reads
+    for (cb, cbt) in &cannonballs {
+        let c = cbt.translation.truncate();
+        let pulse = 0.7 + 0.3 * (t * 12.0).sin();
+        let r = asteroid_radius(3);
+        gizmos.circle_2d(Isometry2d::from_translation(c), r * 1.15, dim(sc, if cb.launched { 1.4 } else { pulse }));
+        gizmos.circle_2d(Isometry2d::from_translation(c), r * 0.5, dim(sc, 0.8 * pulse));
     }
 }
 
@@ -5427,6 +5665,7 @@ fn main() {
                     boss_director,
                     boss_update,
                     devourer_update,
+                    slinger_update,
                     boss_shield,
                     shield_deflect,
                     chain_update,
@@ -6751,6 +6990,39 @@ mod tests {
         app.update();
         assert_eq!(app.world_mut().query::<&Devourer>().iter(app.world()).count(), 1, "wave 10 spawns the devourer");
         assert_eq!(app.world_mut().query::<&Boss>().iter(app.world()).count(), 0, "and not the shaman");
+    }
+
+    #[test]
+    fn slinger_wave_spawns_the_third_boss() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(Wave { level: 15, timer: WAVE_SECS, calm: 0.0 });
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        app.insert_resource(BossState::default());
+        app.add_systems(Update, boss_director);
+        app.update();
+        assert_eq!(app.world_mut().query::<&Slinger>().iter(app.world()).count(), 1, "wave 15 spawns the Slinger");
+        assert_eq!(app.world_mut().query::<&Boss>().iter(app.world()).count(), 0, "and not the shaman");
+        assert_eq!(app.world_mut().query::<&Devourer>().iter(app.world()).count(), 0, "and not the devourer");
+    }
+
+    #[test]
+    fn slinger_core_takes_gunfire() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(Score(0));
+        // an entered, no-longer-charging Slinger at the origin, plus a bullet on top of it
+        let boss = app
+            .world_mut()
+            .spawn((Slinger { hp: SLINGER_HP, entered: true, charge: 0.0, cool: SLINGER_COOL, load: 0.0, ammo: None, pulse: 0.0, dying: 0.0 }, Transform::from_xyz(0.0, 0.0, 0.0)))
+            .id();
+        app.world_mut()
+            .spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.add_systems(Update, collisions);
+        app.update();
+        assert_eq!(app.world().entity(boss).get::<Slinger>().unwrap().hp, SLINGER_HP - 1, "a bullet chips the Slinger's exposed core");
     }
 
     #[test]

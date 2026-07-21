@@ -53,7 +53,7 @@ full (never past — it grows in *size*, not max HP), so letting it feed visibly
 | --- | --- | --- | --- | --- |
 | 5 | **The Warden** | ✅ | *Hoard* — shield of captured rocks on rotating arms; hurls the small ones | Strip the shield, shoot the core through the gaps (bullets hurt the core; chain/warp don't) |
 | 10 | **The Glutton** | ✅ | *Eat* — red seeker devours free rocks to grow bigger & tankier; gorged to full it **OVERLOADS**: swells huge (flashing white as a tell), detonates a near screen-wide blast (wipes the field, kills you unless you're far — `DEVOURER_BURST_R`), then shrinks to nothing and starts over | Starve it (clear the field) + **shoot it down** — gunfire chips its HP *and* claws its size back (`DEVOURER_SHRINK_PER_HIT`), so active fire holds off the overload; when it's swollen and flashing, **get clear** before it bursts |
-| 15 | **The Slinger** | 🔷 | *Shoot* — large enemy ship lines a big rock between you two and blasts it at you like a cannonball | Keep the lane clear / juke the shot; break its ammo first |
+| 15 | **The Slinger** | ✅ | *Shoot* — hovers up high (mirroring your x), LOADS a big rock muzzle-forward (a charging telegraph), then LAUNCHES it at you like a cannonball; exposed core, no shield | Dodge the shot, or shoot the loaded rock to disarm it; chip the core between barrages |
 | 20 | **The Detonator** | 🔷 | *Prime* — turns nearby rocks into live bombs; itself armored | Bait the chain — only explosive blasts crack its shell |
 | 25 | **The Pulsar** | 🔷 | *Pulse* — invulnerable while lit; shockwaves fling every rock (and you) outward | Hit only on the dark beat; don't get pinned to a wall |
 | 30 | **The Singularity** | 🔷 | *Pull* — gravity drags all rocks + you into a crushing orbit | Thrust against the pull; let it crush on its own haul, or feed it an explosive |
@@ -107,10 +107,17 @@ the rock mix lives in `roll_rock_kind` (orange fraction ~0.25 on waves 11–13, 
 | 12 | Limpet (new mob) + orange | orange wired ✅ · Limpet ✅ (core) |
 | 13 | green + orange + Limpets (as 12) | orange/green wired ✅ · Limpet ✅ (core) |
 | 14 | orange only | wired ✅ |
-| 15 | **The Slinger** (boss) + green only | green wired ✅ · boss pending (shows boss #1 as placeholder) |
+| 15 | **The Slinger** (boss) + green only | green wired ✅ · Slinger ✅ (Drone drop TODO) |
 
 Build order (one section at a time): **1. orange mechanic ✅ → 2. wave restructure + orange/green
-wiring ✅ (§A) → 3. Limpet mob ✅ core (§B) → 4. Slinger boss (§C) → 5. Slinger's Drone powerup.**
+wiring ✅ (§A) → 3. Limpet mob ✅ core (§B) → 4. Slinger boss ✅ (§C) → 5. Slinger's Drone powerup.**
+
+The Slinger (§C, ✅): boss 3, wave 15. Glides in, then hovers high mirroring the ship's x; on a cadence
+it spawns a `Cannonball` (a large rock) muzzle-forward, holds it charging for `SLINGER_LOAD`s (a
+telegraph — shoot the rock to disarm), then launches it at the ship at `SLINGER_CANNON_SPEED`. Reuses
+the asteroid systems (bullets shatter the ammo; it kills the ship on contact) but a launched round
+despawns off-screen instead of recycling. Exposed core (`SLINGER_HP`, no shield); dodge + chip.
+**TODO:** drop the Drone pickup on death (currently just advances the wave).
 
 The Limpet (§B, ✅ core): a cyan parasite that TETHERS to a large rock — it rigidly rides the rim
 (glued to the rock's edge with little gripping claws, not floating near it). **Peek-to-fire:** it
