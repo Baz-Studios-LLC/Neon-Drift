@@ -50,6 +50,8 @@ const GRID_CELL: f32 = 52.0;
 const WAVE_SECS: f32 = 120.0; // 2-minute waves — survive the timer to advance (was 180; shortened so reaching wave 15 is achievable in one sitting)
 const POP_BASE: i32 = 5; // asteroids on screen = POP_BASE + wave...
 const POP_CAP: i32 = 18; // ...capped so the field never becomes an unavoidable wall
+const SLINGER_WAVE_ROCKS: i32 = 6; // sparse field on the Slinger wave — it spawns its own cannonballs and
+                                   // doesn't use field rocks, so a full field is just clutter to dodge through
 const BIG_FLOOR: i32 = 4; // always keep at least this many LARGE (size-3) rocks around: keeps the
                           // field from silting up with small debris, and gives the boss big rocks to grab
 const SPAWN_INTERVAL: f32 = 1.6; // seconds between streamed-in replacement rocks (manageable rate)
@@ -298,6 +300,12 @@ fn body_mass(r: f32) -> f32 {
     r * r
 }
 fn population_target(level: i32) -> i32 {
+    // the Slinger doesn't eat or grab rocks (it makes its own cannonballs), so keep its arena sparse —
+    // a full field just clutters the fight. The Warden (shield) and Devourer (food) DO use rocks, so
+    // they keep the normal count.
+    if is_slinger_wave(level) {
+        return SLINGER_WAVE_ROCKS;
+    }
     (POP_BASE + level).min(POP_CAP)
 }
 
@@ -2869,6 +2877,7 @@ fn boss_director(
     arena: Res<Arena>,
     mut state: ResMut<BossState>,
     mut enemies: Query<&mut Enemy>,
+    field: Query<Entity, (With<Asteroid>, Without<Cannonball>)>,
 ) {
     if !is_boss_wave(wave.level) || state.fought == wave.level {
         return;
@@ -2882,6 +2891,12 @@ fn boss_director(
         ));
     } else if is_slinger_wave(wave.level) {
         // Boss 3: the Slinger glides in from the top, then hovers across from the ship and fires rocks.
+        // Clear the field for a clean "boss + green only" slate — the Slinger makes its own cannonballs
+        // and doesn't use field rocks, so leftovers from wave 14 would just clutter the fight (and
+        // top_up only ADDS, never trims). top_up then streams the sparse SLINGER_WAVE_ROCKS back in.
+        for a in &field {
+            commands.entity(a).despawn();
+        }
         commands.spawn((
             Slinger { hp: SLINGER_HP, entered: false, charge: SLINGER_INTRO, cool: SLINGER_COOL, load: 0.0, ammo: None, pulse: 0.0, dying: 0.0 },
             Transform::from_xyz(0.0, arena.half.y + SLINGER_R, 0.0),
@@ -6821,6 +6836,13 @@ mod tests {
         assert_eq!(mine_target(5, 4), 2, "capped at 50% of 4 asteroids");
         assert_eq!(mine_target(16, 100), 0, "loop: wave 16 = content 1 → no mines (not pinned at the cap)");
         assert_eq!(mine_target(17, 100), 2, "loop: wave 17 = content 2 → back to 2");
+    }
+
+    #[test]
+    fn slinger_wave_keeps_a_sparse_field() {
+        assert_eq!(population_target(15), SLINGER_WAVE_ROCKS, "the Slinger wave stays sparse (it makes its own ammo)");
+        assert_eq!(population_target(14), POP_CAP, "the all-orange wave 14 keeps the full field");
+        assert_eq!(population_target(30), SLINGER_WAVE_ROCKS, "the looped Slinger wave (content 15) is sparse too");
     }
 
     #[test]

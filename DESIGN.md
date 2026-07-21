@@ -117,7 +117,9 @@ it spawns a `Cannonball` (a large rock) muzzle-forward, holds it charging for `S
 telegraph — shoot the rock to disarm), then launches it at the ship at `SLINGER_CANNON_SPEED`. Reuses
 the asteroid systems (bullets shatter the ammo; it kills the ship on contact) but a launched round
 despawns off-screen instead of recycling. Exposed core (`SLINGER_HP`, no shield); dodge + chip.
-**TODO:** drop the Drone pickup on death (currently just advances the wave).
+Because it doesn't use field rocks, its wave runs a **sparse field** (`SLINGER_WAVE_ROCKS`, not the
+usual `POP_BASE+level`) and the field is **cleared when it arrives** (a clean green-only slate — the
+Warden/Devourer keep their rocks). **TODO:** drop the Drone pickup on death (currently just advances).
 
 The Limpet (§B, ✅ core): a cyan parasite that TETHERS to a large rock — it rigidly rides the rim
 (glued to the rock's edge with little gripping claws, not floating near it). **Peek-to-fire:** it
