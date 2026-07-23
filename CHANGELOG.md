@@ -5,7 +5,42 @@ Baz Studios launcher.) **Keep this current with every change** — it's the reco
 
 ## Unreleased
 
-_Nothing yet — work in progress lands here, then gets renamed to the next version when a release is cut._
+Finale-fight fixes and polish (playtest feedback):
+
+- **Phantom Phase 2 is now POSSESSION — a whole new mechanic** (replacing the old "identical decoys" shell
+  game). The Haunt **seeks out a real asteroid, dives into it**, and hides inside — that rock turns haunted
+  (glowing, ember-eyed), **homes at you, and kills on contact**, while your shots hit the *rock*, not the
+  ghost. **Break the possessed rock** and the Haunt is **ripped out into the open** — surfaced and
+  vulnerable, the punish window — then it hunts the next rock, until the phase falls. Each phase now has its
+  own identity: **P1** the sweep ray, **P2** the possession hunt, **P3** the charge. (The one fight where the
+  asteroid field itself becomes the boss.)
+- **Phase 3 drops the beam — a pure, relentless charger now.** No more sweep ray in P3 (that's P1's
+  signature); the cornered Haunt just **hurls itself at you on telegraphed lock-on lines**, more often the
+  closer it is to death, and **stalks** you between lunges.
+- **The sweep ray now reaches the whole arena AND aims at you.** It was falling short of the far edge from an
+  off-centre position — the beam now spans the full arena diagonal from wherever it stands, and its swept
+  quadrant **centres on the corner you're nearest**, so it's a real threat to dodge (the ~1.7s telegraph is
+  your window).
+- **The Haunt has its own sound now.** It was borrowing the warp effect for *everything*; every spectral cue
+  (the ray igniting, possessing, being ripped out, charging, dying) is now its own eerie whisper-whoosh, not
+  the warp.
+- **It no longer clips through asteroids.** The Haunt's spectral body now **dissolves any rock it drifts
+  through** (it's a ghost — matter unmakes in its wake), instead of overlapping them.
+- **A cinematic death scene, reworked.** On the kill the boss first **draws back to the centre**, then
+  **erupts** — an opening bang followed by a **constant stream of explosions from the middle that keeps the
+  screen full of light** until the send-off ends (not a single split-second pop). Its **true-form core
+  streaks off east**, small and subtle, easy to miss among the light (the sequel seed). Once the core has
+  left the arena, **your ship warps off east after it** — and only once *everything* is cleared does the
+  **Victory screen** begin. (No more stray "NEXT WAVE IN" on the win, no early Victory pop; the ship stays
+  shielded throughout so a last-life win can't flip to Game Over.)
+- **The finale field no longer arrives as a wall.** Each mono-type group of ten now **trickles in a rock at
+  a time** instead of all appearing together, so a fresh colour drifts on gradually. (Also fixed: a lingering
+  **gold 1UP rock** no longer stalls the finale — the belt keeps flowing while it's on screen.)
+- **Red rocks work in the all-red finale group.** A red now absorbs the nearest rock **including other reds**,
+  so a mono-type red pack **consolidates into fewer, bigger threats** instead of drifting inert (a pair can't
+  annihilate each other — one grows, one is eaten).
+- **Launcher:** the VIOLET EDGE logo is now bundled as the launcher's card art (takes effect at the next
+  launcher build).
 
 ## v0.3.0 — The Haunt: Act III, the six-boss run & the finale (2026-07-23)
 

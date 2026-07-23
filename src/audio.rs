@@ -489,6 +489,35 @@ pub fn warp_wav() -> Vec<u8> {
     wav_bytes(&samples, SR as u32)
 }
 
+/// The Haunt (final boss) — its OWN signature: a cold SPECTRAL whisper-whoosh, distinct from the warp.
+/// A faint hollow detuned dyad drifting down (the "presence") under an airy band-swept noise breath whose
+/// centre glides down — eerie and ghostly, not the portal-tearing plunge of `warp_wav`. Swept filters need
+/// state, so it runs its own loop.
+pub fn haunt_sfx_wav() -> Vec<u8> {
+    let dur = 0.4;
+    let n = (dur * SR) as usize;
+    let mut buf = vec![0f32; n];
+    let (mut la, mut lb) = (0.0f32, 0.0f32);
+    for (i, out) in buf.iter_mut().enumerate() {
+        let t = i as f32 / SR;
+        // faint hollow tone (fundamental + a hollow fifth) drifting down — the spectral "presence"
+        let f = 240.0 * (1.0 - 0.2 * (t / dur));
+        let tone = (TAU * f * t).sin() * 0.4 + (TAU * f * 1.5 * t).sin() * 0.18;
+        // airy band-swept noise (a breath), band centre gliding 2600 → 520 Hz
+        let fc = 2600.0 * (520.0f32 / 2600.0).powf((t / dur).min(1.0));
+        let x = noise(i);
+        la += (1.0 - (-TAU * (fc * 1.5) / SR).exp()) * (x - la);
+        lb += (1.0 - (-TAU * (fc * 0.5) / SR).exp()) * (x - lb);
+        let breath = (la - lb) * 1.8;
+        let env = (t / 0.04).min(1.0) * (-t * 4.5).exp(); // soft attack, medium tail
+        *out = (tone * 0.5 + breath * 0.5) * env;
+    }
+    let peak = buf.iter().fold(0f32, |m, &v| m.max(v.abs())).max(1e-6);
+    let norm = 0.85 / peak;
+    let samples: Vec<i16> = buf.iter().map(|&v| (v * norm * i16::MAX as f32) as i16).collect();
+    wav_bytes(&samples, SR as u32)
+}
+
 /// Achievement unlocked: a bright rolled major arpeggio (C6-E6-G6-C7, each note entering slightly
 /// later so they ring together) — a positive, sparkly "flourish".
 pub fn achievement_sfx_wav() -> Vec<u8> {
@@ -561,6 +590,7 @@ mod tests {
             enemy_shot_wav(),
             enemy_die_wav(),
             warp_wav(),
+            haunt_sfx_wav(),
             achievement_sfx_wav(),
             life_sfx_wav(),
             toggle_sfx_wav(),

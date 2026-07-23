@@ -58,6 +58,8 @@ const POP_CAP: i32 = 18; // ...capped so the field never becomes an unavoidable 
 const SLINGER_WAVE_ROCKS: i32 = 6; // sparse field on the Slinger wave — it spawns its own cannonballs and
                                    // doesn't use field rocks, so a full field is just clutter to dodge through
 const FINALE_GROUP_SIZE: usize = 10; // wave 30: rocks per mono-type group (each group clears before the next drifts in)
+const FINALE_TRICKLE: f32 = 0.45;    // wave 30: gap between rocks as a group trickles in — never a wall of ten drifting on at once
+const FINALE_GROUP_GAP: f32 = 0.8;   // wave 30: brief beat after a group clears before the next colour starts
 const BIG_FLOOR: i32 = 4; // always keep at least this many LARGE (size-3) rocks around: keeps the
                           // field from silting up with small debris, and gives the boss big rocks to grab
 const SPAWN_INTERVAL: f32 = 1.6; // seconds between streamed-in replacement rocks (manageable rate)
@@ -215,7 +217,7 @@ const PULSAR_DEATH_SECS: f32 = 2.2;
 // it RESETS (invulnerable, reforms, repositions) before the next begins. Its signature is the SWEEP RAY
 // (every phase, faster each). The twist: it's INTANGIBLE — your shots pass straight through — and only turns
 // VULNERABLE for a short window right after it fires the ray (it has to SURFACE to attack; that's your only
-// opening). PHASE 2 fractures it into decoys (only the real one attacks); PHASE 3 it turns solid and CHARGES,
+// opening). PHASE 2 POSSESSES a homing rock it hides in (break the vessel to rip it out); PHASE 3 it turns solid and CHARGES,
 // leaving a lethal trail. It ROAMS, holding still while a beam is live or while surfaced. Clear phase 3 → WIN.
 const PHANTOM_PHASE_HP: i32 = 30; // health PER PHASE (refills on each reset) — 3 phases; deplete → reset → next
 const PHANTOM_R: f32 = 46.0;      // a big, imposing core (the finale centrepiece)
@@ -232,18 +234,29 @@ const PHANTOM_RAY_COOLDOWN: f32 = 4.6;   // gap between sweeps in phase 1 (tight
 const PHANTOM_RAY_FIRST: f32 = 2.2;      // grace before the very first sweep (after the intro)
 const PHANTOM_RAY_INNER_R: f32 = 48.0;   // the beam ignores the core zone
 const PHANTOM_RAY_WIDTH: f32 = 26.0;     // visual thickness of the beam
-// ── phase 2 — SPLIT: it fractures into identical decoys; only the real one attacks (watch the eyes) ──
-const PHANTOM_DECOYS: usize = 2;         // apparitions alongside the real one (3 skulls on screen)
+// ── phase 2 — POSSESSION: it SEEKS an existing field rock, dives in (that rock becomes a haunted vessel
+//    that homes + kills on contact) and hides inside; break the vessel to rip it out — its "surface to be
+//    hit". Shooting the possessed rock is how you force it out; the exposed ghost is then the punish window ──
+const PHANTOM_POSSESS_HP: i32 = 4;        // hits to break a vessel and force the Haunt out
+const PHANTOM_POSSESS_SPEED: f32 = 150.0; // how fast a possessed rock homes toward the ship
+const PHANTOM_POSSESS_R: f32 = 30.0;      // vessel radius (contact-kill + shot target)
+const PHANTOM_SEEK_SPEED: f32 = 260.0;    // how fast the ghost glides to the rock it's about to possess
+const PHANTOM_DIVE_FIRST: f32 = 0.7;      // beat after entering phase 2 before the first hunt
+const PHANTOM_DIVE_EVERY: f32 = 0.9;      // beat between being ripped out and hunting the next rock
 // ── phase 3 — HUNT: the mask drops — solid full-time, charging the arena and leaving a lethal wake ──
-const PHANTOM_CHARGE_EVERY: f32 = 4.2;   // gap between charges
+const PHANTOM_CHARGE_EVERY: f32 = 3.5;   // gap between charges (P3 is charge-only now — no beam — so they come a bit more often)
 const PHANTOM_CHARGE_AIM: f32 = 0.8;     // aim-telegraph before the dash (eyes blaze, it locks your position)
 const PHANTOM_CHARGE_SPEED: f32 = 900.0; // dash speed — fast, but locked straight (dodge sideways)
 const PHANTOM_CHARGE_SECS: f32 = 0.6;    // dash duration
 const PHANTOM_TRAIL_TTL: f32 = 2.2;      // how long each spectral afterimage in its wake stays lethal
 const PHANTOM_TRAIL_R: f32 = 16.0;       // kill radius of one afterimage
 // ── the win: a death-throes beat + a spectral shard streaking off-screen (a seed for whatever comes next) ──
-const PHANTOM_VICTORY_SECS: f32 = 2.6;   // the beat between the finale kill and the Victory screen (no abrupt cut)
-const PHANTOM_SHARD_SPEED: f32 = 340.0;  // how fast the escaping shard streaks off-screen
+const PHANTOM_VICTORY_SECS: f32 = 9.0;      // death-scene SAFETY cap — normally it ends when the shard + ship have flown off (event-driven)
+const PHANTOM_BOOM_EVERY: f32 = 0.14;       // death scene: gap between explosions in the constant stream that runs until the core's off-screen
+const PHANTOM_SHARD_MIN_SPEED: f32 = 60.0;  // the escaping core tears loose slowly…
+const PHANTOM_SHARD_MAX_SPEED: f32 = 270.0; // …then accelerates east off-screen (ease-in over PHANTOM_SHARD_RAMP)
+const PHANTOM_SHARD_RAMP: f32 = 2.1;        // seconds for the fleeing core to reach full speed (slower → the send-off lingers)
+const SHIP_DEPART_SPEED: f32 = 460.0;       // the hero's ship warps off east after the shard has left
 
 // Boss 2 — the devourer (wave 10): a red seeker that eats rocks to grow + heal.
 const DEVOURER_HP: i32 = 34; // core HP; it STARTS full and HEALS toward it, so it plays tankier than this raw number (ramp: > Warden). Reduced from 70 to fit the ascending ladder
@@ -640,6 +653,25 @@ fn burst(commands: &mut Commands, pos: Vec2, color: Color, count: usize, speed: 
     }
 }
 
+/// A radial burst of light whose particles actually REACH the arena edge (and a bit past) before fading —
+/// the finale death scene's screen-filling light. `Particle` velocity DECELERATES (`vel *= 0.25^dt`), so a
+/// particle's total travel is `v0·(1 − 0.25^ttl)/ln4`; we invert that to launch each one fast enough to
+/// carry it all the way out. Emitted from `pos`.
+fn light_burst_to_edge(commands: &mut Commands, pos: Vec2, half: Vec2, count: usize, color: Color, rng: &mut impl Rng) {
+    let edge = half.length(); // centre → far corner: the farthest a particle might need to travel
+    for _ in 0..count {
+        let a = rng.gen_range(0.0..TAU);
+        let ttl = rng.gen_range(1.9..2.8);            // linger longer — a slower, more majestic expansion
+        let target = edge * rng.gen_range(1.15..1.55); // gentler overshoot → a less violent launch (still crosses the edge)
+        let reach = (1.0 - 0.25_f32.powf(ttl)) / 4.0_f32.ln(); // fraction of v0 covered over the lifetime
+        let v0 = target / reach.max(1e-3);
+        commands.spawn((
+            Particle { vel: Vec2::from_angle(a) * v0, life: ttl, ttl, color },
+            Transform::from_xyz(pos.x, pos.y, 0.0),
+        ));
+    }
+}
+
 // The shared ship-death sequence: debris burst, despawn, lose a life → respawn or
 // (on the last life) Game Over. Used by ship_death (asteroids) and mine_update.
 fn kill_ship(
@@ -717,7 +749,7 @@ type GameplayEntity = Or<(
     With<Slinger>,
     // (Cannonball entities are also Asteroids, so With<Asteroid> already covers them.)
     // Nested Or keeps this within Bevy's 15-element tuple-filter limit.
-    Or<(With<ChainShot>, With<Pickup>, With<Drone>, With<Well>, With<Detonator>, With<Pulsar>, With<Phantom>, With<PhantomDecoy>, With<SpectralTrail>, With<EscapeShard>)>,
+    Or<(With<ChainShot>, With<Pickup>, With<Drone>, With<Well>, With<Detonator>, With<Pulsar>, With<Phantom>, With<Possessed>, With<SpectralTrail>, With<EscapeShard>)>,
 )>;
 
 #[derive(Component)]
@@ -885,7 +917,7 @@ enum RayPhase {
 // Fights across three phases gated by a PER-PHASE health pool (`hp` refills each phase): deplete the phase
 // → it RESETS (invulnerable `transition` beat, reforms + repositions) → the next phase begins. Every phase
 // has the Sweep Ray (faster each). It is INTANGIBLE — shots pass through — EXCEPT during `vuln` (the window
-// right after it fires the ray, when it must SURFACE). p2 fractures it into decoys; p3 turns solid + charges.
+// right after it fires the ray, when it must SURFACE). p2 possesses a homing rock; p3 turns solid + charges.
 #[derive(Component)]
 struct Phantom {
     hp: i32,          // health of the CURRENT phase (refills to PHANTOM_PHASE_HP on each reset)
@@ -895,7 +927,8 @@ struct Phantom {
     phase: u8,        // 1..=3 — advanced only by a completed reset, never mid-phase
     transition: f32,  // > 0 → the invulnerable RESET beat between phases (reposition + reform, no attacks)
     flash: f32,       // > 0 → a phase-start flash is fading (the spectacle: the mind fracturing further)
-    victory: f32,     // > 0 → the finale is beaten: a death-throes beat runs before the Victory screen
+    victory: f32,     // > 0 → the finale is beaten: the death SCENE plays out before the Victory screen
+    erupted: bool,    // the death scene has two beats: gather to CENTRE (false) → then ERUPT (light + core flees)
     vuln: f32,        // > 0 → SURFACED: solid, still, and hittable (set after each ray; the p1/p2 damage window)
     // ── Sweep Ray state (its own signature mechanic) ──
     ray: RayPhase,
@@ -908,14 +941,20 @@ struct Phantom {
     aim: f32,         // > 0 → aim-telegraph before a dash (locked on, eyes blazing)
     charging: f32,    // > 0 → mid-DASH, leaving the lethal trail
     charge_dir: Vec2, // locked dash direction (fixed when the aim starts — dodge sideways)
+    // ── phase 2 — POSSESSION state ──
+    possessed: Option<Entity>, // the vessel it's hiding in (None = hunting a rock, gliding to one, or just ripped out)
+    seeking: Option<Entity>,   // the field rock it's currently gliding toward to possess (None = not yet fixed on one)
+    dive: f32,                 // countdown before it goes hunting for the next rock
 }
 
-// A phase-2 decoy apparition: looks identical to the real Phantom while idle, but never attacks and can't
-// be hurt — shots and the ship pass straight through. `seed` offsets its roam so the pack disperses.
+// The phase-2 VESSEL: the Haunt pours into a chunk of rock and hides inside it. The vessel homes at the
+// ship and kills on contact (`possessed_update`); shots hit the vessel (`collisions`), and breaking it (its
+// `hp`) rips the Haunt out into the open. `verts` is its rock silhouette; `pulse` drives the haunted glow.
 #[derive(Component)]
-struct PhantomDecoy {
+struct Possessed {
+    hp: i32,
     pulse: f32,
-    seed: f32,
+    verts: Vec<Vec2>,
 }
 
 // One spectral afterimage of the phase-3 charge: lingers `ttl`, kills the ship on contact while it lasts.
@@ -926,10 +965,24 @@ struct SpectralTrail {
 
 // A shard of the beaten Phantom, streaking off-screen after the finale kill — a seed for what comes next.
 // Purely cosmetic (no collision); moved by its Velocity and culled at the edge in `escape_shard_update`.
+// The Haunt's TRUE FORM — the searing core you glimpse through the mask-split while it's surfaced. When the
+// finale kill shatters its shell, THIS is what's left, and it tears free and flees off-screen (the sequel
+// seed). Moved along `dir` at an ease-in speed (slow rip-loose → accelerating streak); purely cosmetic.
 #[derive(Component)]
 struct EscapeShard {
+    dir: Vec2,         // flight direction, fixed at birth
     spin: f32,
-    verts: Vec<Vec2>, // its jagged little silhouette (spun as it flies)
+    age: f32,          // seconds alive → drives the ease-in speed ramp
+    verts: Vec<Vec2>,  // its spiky little core silhouette (spun as it flies)
+    trail: Vec<Vec2>,  // recent world positions → a fading comet streak so the escape reads
+}
+
+// The hero's ship, warping off EAST after the shard — the closing beat of the finale (the player pursues
+// what fled). Cosmetic: a plain entity (NOT a `Ship`, so ship_control/ship_bounds leave it alone) flown
+// off-screen by `departing_ship_update`, then culled. Spawned once the escaping shard has left the arena.
+#[derive(Component)]
+struct DepartingShip {
+    flame: f32, // thrust flicker
 }
 
 impl Phantom {
@@ -944,6 +997,7 @@ impl Phantom {
             transition: 0.0,
             flash: 0.0,
             victory: 0.0,
+            erupted: false,
             vuln: 0.0,
             ray: RayPhase::Idle,
             ray_cool: PHANTOM_RAY_FIRST,
@@ -954,6 +1008,9 @@ impl Phantom {
             aim: 0.0,
             charging: 0.0,
             charge_dir: Vec2::X,
+            possessed: None,
+            seeking: None,
+            dive: 0.0,
         }
     }
 }
@@ -1231,11 +1288,13 @@ struct BossState {
     fought: i32,
 }
 
-// The FINALE field (wave 30) drips in one mono-type GROUP of ten at a time; the next group arrives only
-// once the field is empty. `idx` cycles the kinds (blue → green → orange → pulser → red → …).
+// The FINALE field (wave 30) drips in one mono-type GROUP of ten, a few rocks per beat (never a wall);
+// the next colour only starts once the field is empty. `idx` cycles the kinds (blue → green → orange →
+// pulser → red → …); `remaining` counts down the current group as it trickles in.
 #[derive(Resource, Default)]
 struct FinaleGroup {
     idx: usize,
+    remaining: usize,
 }
 
 // Chain-shot state (the secondary weapon). `unlocked` flips when the pickup is grabbed.
@@ -1871,21 +1930,28 @@ fn blast_asteroids(
     }
 }
 
-// Red (growing) asteroids (Act III): each absorbs the nearest NON-red rock within RED_ABSORB_R every
-// RED_ABSORB_EVERY, swelling one size (up to large). Broken into smaller reds, they eat the field back
-// up — a whack-a-mole. It stays soft (1 hp): the threat is regrowth, not tankiness. Your plain shot
-// splits a red into more reds; mass/warhead/chain/mine destroy one outright (no regrow) — the counters.
+// Red (growing) asteroids (Act III): each absorbs the nearest rock within RED_ABSORB_R every
+// RED_ABSORB_EVERY, swelling one size (up to large) — OTHER REDS included, so an all-red pack (the
+// wave-30 finale's mono-type red group) still consolidates into fewer, bigger threats instead of just
+// drifting inert. Broken into smaller reds, they eat the field back up — a whack-a-mole. It stays soft
+// (1 hp): the threat is regrowth, not tankiness. Your plain shot splits a red into more reds;
+// mass/warhead/chain/mine destroy one outright (no regrow) — the counters.
 // Gold, live bombs, boss-held rocks and cannonballs are never eaten.
 fn red_growth(
     time: Res<Time>,
     mut commands: Commands,
-    mut reds: Query<(&mut Asteroid, &mut Red, &Transform)>,
-    others: Query<(Entity, &Transform), (With<Asteroid>, Without<Red>, Without<Shielded>, Without<Cannonball>, Without<Gold>, Without<Detonating>)>,
+    mut reds: Query<(Entity, &mut Asteroid, &mut Red, &Transform)>,
+    // absorbable rocks — INCLUDING other reds (a red just excludes ITSELF below), so a mono-type red pack
+    // still has prey. Gold, live bombs, shielded/boss-held rocks and cannonballs are off the menu.
+    others: Query<(Entity, &Transform), (With<Asteroid>, Without<Shielded>, Without<Cannonball>, Without<Gold>, Without<Detonating>)>,
 ) {
     let dt = time.delta_secs();
     let mut rng = rand::thread_rng();
     let mut eaten: HashSet<Entity> = HashSet::new();
-    for (mut a, mut red, rt) in &mut reds {
+    for (self_e, mut a, mut red, rt) in &mut reds {
+        if eaten.contains(&self_e) {
+            continue; // already swallowed by another red this frame — it can't also feed (prevents a pair annihilating each other)
+        }
         red.cool -= dt;
         if red.cool > 0.0 || a.size >= 3 {
             continue; // still digesting, or already at max size
@@ -1893,7 +1959,7 @@ fn red_growth(
         let rp = rt.translation.truncate();
         let prey = others
             .iter()
-            .filter(|(e, _)| !eaten.contains(e))
+            .filter(|(e, _)| *e != self_e && !eaten.contains(e)) // never itself, never an already-eaten rock
             .map(|(e, t)| (e, t.translation.truncate()))
             .filter(|(_, p)| p.distance_squared(rp) < RED_ABSORB_R * RED_ABSORB_R)
             .min_by(|(_, p), (_, q)| p.distance_squared(rp).total_cmp(&q.distance_squared(rp)));
@@ -2616,19 +2682,21 @@ fn collisions(
         Query<(&Transform, &mut Detonator)>,
         Query<(&Transform, &mut Pulsar)>,
         Query<(&Transform, &mut Phantom)>,
+        Query<(Entity, &Transform, &mut Possessed)>, // p2 vessels: gunfire chips their hp; break one → the Haunt is ripped out
     ),
     mut score: ResMut<Score>,
     mut sfx: EventWriter<SoundFx>,
     mut stats: ResMut<Stats>,
 ) {
     let mut rng = rand::thread_rng();
-    let (mut bosses, mut devourers, mut slingers, mut detonators, mut pulsars, mut phantoms) = boss_cores;
+    let (mut bosses, mut devourers, mut slingers, mut detonators, mut pulsars, mut phantoms, mut vessels) = boss_cores;
     let mut dead_b: HashSet<Entity> = HashSet::new();
     let mut dead_a: HashSet<Entity> = HashSet::new();
     let mut dead_m: HashSet<Entity> = HashSet::new();
     let mut dead_e: HashSet<Entity> = HashSet::new();
     let mut dead_l: HashSet<Entity> = HashSet::new();
     let mut dead_s: HashSet<Entity> = HashSet::new();
+    let mut dead_v: HashSet<Entity> = HashSet::new(); // p2 vessels broken this pass
     for (be, bt, b, is_warhead) in &bullets {
         if dead_b.contains(&be) {
             continue;
@@ -2903,6 +2971,23 @@ fn collisions(
                 break;
             }
         }
+        // ── phase-2 VESSELS: a possessed rock takes gunfire; breaking it (hp ≤ 0) rips the Haunt out ──
+        for (pve, pvt, mut pv) in &mut vessels {
+            if dead_v.contains(&pve) {
+                continue;
+            }
+            let rr = PHANTOM_POSSESS_R + br;
+            if bp.distance_squared(pvt.translation.truncate()) < rr * rr {
+                dead_b.insert(be);
+                commands.entity(be).despawn();
+                pv.hp -= power; // mass shots (higher `power`) crack it faster
+                burst(&mut commands, bp, phantom_color(), 6, 180.0, &mut rng);
+                if pv.hp <= 0 {
+                    dead_v.insert(pve); // broken — `possessed_update` shatters + despawns it, and the Haunt surfaces
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -2964,8 +3049,8 @@ fn top_up_asteroids(
     arena: Res<Arena>,
     mut commands: Commands,
     mut finale: ResMut<FinaleGroup>,
-    asteroids: Query<&Asteroid>,
-) {
+    asteroids: Query<&Asteroid, Without<Gold>>, // EXCLUDE the gold 1UP — a lingering gold must not count as
+) {                                             // "field not clear", or it stalls the finale's next group
     if wave.calm > 0.0 {
         return;
     }
@@ -2973,21 +3058,28 @@ fn top_up_asteroids(
     if clock.0 > 0.0 {
         return;
     }
-    let count = asteroids.iter().count() as i32;
+    let count = asteroids.iter().count() as i32; // non-gold rocks on the field
 
-    // ── FINALE (wave 30): one mono-type GROUP of ten at a time — the next colour only drifts in once the
-    //    field is completely clear, so the arena never crowds. Cycles blue → green → orange → pulser → red. ──
+    // ── FINALE (wave 30): one mono-type GROUP of ten, TRICKLED in a rock at a time — never a wall drifting
+    //    on together. The next colour only starts once the field is completely clear, so the arena never
+    //    crowds. Cycles blue → green → orange → pulser → red. ──
     if content_wave(wave.level) == 30 {
-        if count == 0 {
-            const KINDS: [RockKind; 5] = [RockKind::Blue, RockKind::Green, RockKind::Orange, RockKind::Pulser, RockKind::Red];
+        const KINDS: [RockKind; 5] = [RockKind::Blue, RockKind::Green, RockKind::Orange, RockKind::Pulser, RockKind::Red];
+        if finale.remaining > 0 {
+            // still delivering the current group — one rock, then a short beat before the next
             let kind = KINDS[finale.idx % KINDS.len()];
-            finale.idx += 1;
             let mut rng = rand::thread_rng();
-            for _ in 0..FINALE_GROUP_SIZE {
-                spawn_edge_asteroid(&mut commands, arena.half, &mut rng, kind, false);
-            }
+            spawn_edge_asteroid(&mut commands, arena.half, &mut rng, kind, false);
+            finale.remaining -= 1;
+            clock.0 = FINALE_TRICKLE;
+        } else if count == 0 {
+            // group delivered AND cleared → queue the next colour (it starts trickling on the next beat)
+            finale.idx += 1;
+            finale.remaining = FINALE_GROUP_SIZE;
+            clock.0 = FINALE_GROUP_GAP;
+        } else {
+            clock.0 = 0.5; // group's all spawned but still being cleared — re-check shortly
         }
-        clock.0 = 0.5; // re-check for an empty field shortly
         return;
     }
 
@@ -3757,12 +3849,13 @@ fn boss_director(
         ));
     } else if is_phantom_wave(wave.level) {
         // Boss 6 (FINALE): CLEAR the field for a clean slate, then the belt returns in mono-type groups of
-        // ten (see `top_up_asteroids`). Reset the group cycle so it opens on blue.
+        // ten (see `top_up_asteroids`). Reset the group cycle so it opens on blue, trickling from the start.
         for (a, at) in &field {
             burst(&mut commands, at.translation.truncate(), Color::srgb(2.2, 2.8, 4.2), 9, 175.0, &mut rng);
             commands.entity(a).despawn();
         }
         finale.idx = 0;
+        finale.remaining = FINALE_GROUP_SIZE;
         commands.spawn((
             Phantom::new(PHANTOM_PHASE_HP, false, PHANTOM_INTRO),
             Transform::from_xyz(0.0, arena.half.y + PHANTOM_R, 0.0),
@@ -4595,7 +4688,9 @@ fn wave_banner_update(
 // clock. Only bosses set `calm`, so this only appears in the 10s lull after a boss.
 fn calm_countdown_update(wave: Res<Wave>, mut q: Query<(&mut Text, &mut TextColor), With<CalmCountdownText>>) {
     for (mut text, mut color) in &mut q {
-        if wave.calm > 0.0 {
+        // wave 30 is the FINALE — there is no next wave, so never show the countdown there (its `calm` is
+        // set only to pause the field for the death scene, not to herald a next wave)
+        if wave.calm > 0.0 && content_wave(wave.level) != 30 {
             let secs = wave.calm.ceil().max(1.0) as i32;
             text.0 = format!("NEXT WAVE IN {secs}");
             let pulse = 0.7 + 0.3 * wave.calm.fract(); // brightest just after each tick, easing down
@@ -5244,7 +5339,7 @@ fn angle_in_arc(pa: f32, lo: f32, hi: f32) -> bool {
 // centre, then fights on three per-phase-pool phases. It is INTANGIBLE (shots pass through, rocks drift
 // through it, contact is harmless) EXCEPT while SURFACED: firing the Sweep Ray forces it to materialize for
 // a short `vuln` window (solid, still, hittable — and its body kills on contact). Bait the ray, punish the
-// window. Deplete a phase → RESET → next. Phase 2 fractures it into decoys; phase 3 turns it solid and
+// window. Deplete a phase → RESET → next. Phase 2 possesses a homing rock (break it to expose it); phase 3 turns it solid and
 // charging (later stages). Clear phase 3 → VICTORY.
 fn phantom_update(
     time: Res<Time>,
@@ -5253,17 +5348,20 @@ fn phantom_update(
     mut run: ResMut<Run>,
     mut next: ResMut<NextState<GameState>>,
     mut score: ResMut<Score>,
+    mut wave: ResMut<Wave>, // the death scene holds the arena calm (pauses the finale spawner)
     mut sfx: EventWriter<SoundFx>,
     dev: Res<Dev>,
     mut phantoms: Query<(Entity, &mut Transform, &mut Phantom)>,
-    ships: Query<(Entity, &Transform, &Ship), Without<Phantom>>,
+    mut ships: Query<(Entity, &Transform, &mut Ship), Without<Phantom>>, // &mut: the finale kill shields the ship for the send-off
     rocks: Query<(Entity, &Transform), (With<Asteroid>, Without<Phantom>, Without<Gold>)>, // the beam vaporizes rocks it crosses (never the gold 1UP)
-    mut decoys: Query<(Entity, &mut Transform), (With<PhantomDecoy>, Without<Phantom>, Without<Ship>, Without<Asteroid>)>, // p2 apparitions (disjoint from every other Transform access here): shuffled with on surface-end, cleaned up on phase end
+    vessels: Query<(Entity, &Transform), (With<Possessed>, Without<Phantom>, Without<Ship>, Without<Asteroid>)>, // p2 vessels: existence tells if the current one's been broken (→ rip out); position lets the ghost ride it
     trails: Query<Entity, With<SpectralTrail>>, // p3 afterimages: cleaned up on the win
+    // death scene: are the escaping shard / the departing ship still on screen? (drives the send-off's beats)
+    finale_fx: (Query<Entity, With<EscapeShard>>, Query<Entity, With<DepartingShip>>),
 ) {
     let dt = time.delta_secs();
     let mut rng = rand::thread_rng();
-    let ray_len = arena.half.length() + 40.0; // the beam reaches past the far corner of the arena
+    let ray_len = arena.half.length() * 2.0 + 40.0; // FULL arena diagonal — so from any position the beam still reaches the far edge
     let ship_info = ships.iter().next().map(|(e, t, sh)| (e, t.translation.truncate(), immune(sh, &dev)));
     for (sge, mut stf, mut sg) in &mut phantoms {
         let mut p = stf.translation.truncate();
@@ -5310,42 +5408,86 @@ fn phantom_update(
                 sg.ray_cool = PHANTOM_RAY_FIRST;
                 sg.charge_cool = PHANTOM_CHARGE_EVERY;
                 if sg.phase == 2 {
-                    // SPLIT: it fractures — identical apparitions scatter from the reformation point
-                    for i in 0..PHANTOM_DECOYS {
-                        let off = Vec2::from_angle(rng.gen_range(0.0..TAU)) * 180.0;
-                        commands.spawn((
-                            PhantomDecoy { pulse: rng.gen_range(0.0..TAU), seed: (i + 1) as f32 * 2.3 },
-                            Transform::from_xyz(p.x + off.x, p.y + off.y, 0.0),
-                        ));
-                    }
+                    // POSSESSION begins: after a short beat it hunts a field rock to dive into (no ray in p2)
+                    sg.possessed = None;
+                    sg.seeking = None;
+                    sg.dive = PHANTOM_DIVE_FIRST;
                 }
                 burst(&mut commands, p, phantom_color(), 46, 380.0, &mut rng);
-                sfx.write(SoundFx::Warp);
+                sfx.write(SoundFx::Haunt);
             }
             continue; // no attacks / contact / damage during the reset
         }
 
-        // ── VICTORY THROES: it's beaten — the arena is held calm and the core comes apart over a beat while
-        //    the shard escapes, THEN the Victory screen (so the win doesn't cut in abruptly on the kill) ──
+        // ── DEATH SCENE: it's beaten. Set up on the kill frame (below), it plays out here beat by beat — the
+        //    core flees EAST among the light, THEN the hero's ship warps off after it, and ONLY once
+        //    everything's cleared does the Victory screen come. ──
         if sg.victory > 0.0 {
-            sg.victory -= dt;
-            for (re, _t) in &rocks {
-                commands.entity(re).despawn(); // keep the arena calm for the send-off
-            }
-            for (de, _dtf) in &decoys {
-                commands.entity(de).despawn();
+            sg.victory -= dt; // safety cap only — the beats below normally end the scene first
+            for (ve, _vtf) in &vessels {
+                commands.entity(ve).despawn(); // clear any p2 leftover
             }
             for te in &trails {
-                commands.entity(te).try_despawn();
+                commands.entity(te).try_despawn(); // clear the p3 wake
             }
-            for _ in 0..4 {
-                let off = Vec2::from_angle(rng.gen_range(0.0..TAU)) * rng.gen_range(0.0..PHANTOM_R);
-                burst(&mut commands, p + off, phantom_color(), 3, 240.0, &mut rng); // it crackles apart
+            if !sg.erupted {
+                // BEAT 1 — GATHER: the dying boss is drawn back to the MIDDLE, then it ERUPTS
+                p += (Vec2::ZERO - p) * (1.0 - (-dt * 6.0).exp());
+                stf.translation.x = p.x;
+                stf.translation.y = p.y;
+                let since = PHANTOM_VICTORY_SECS - sg.victory;
+                if p.length() < 12.0 || since > 0.7 {
+                    sg.erupted = true;
+                    p = Vec2::ZERO;
+                    stf.translation = Vec3::ZERO;
+                    // POP every remaining asteroid
+                    for (re, rt) in &rocks {
+                        burst(&mut commands, rt.translation.truncate(), phantom_color(), 8, 260.0, &mut rng);
+                        commands.entity(re).despawn();
+                    }
+                    // the opening BANG — a big burst of light from the middle, carried all the way to the edge…
+                    light_burst_to_edge(&mut commands, Vec2::ZERO, h, 220, Color::srgb(7.0, 7.6, 8.2), &mut rng);
+                    sg.dive = 0.0; // …then a CONSTANT stream of explosions starts (see beat 2), timed off `dive`
+                    // the true-form CORE tears free and flees EAST — small + subtle, lost among the light
+                    let verts: Vec<Vec2> = (0..5).map(|i| Vec2::from_angle(i as f32 / 5.0 * TAU + 0.3) * (5.0 + rng.gen_range(-1.5..3.0))).collect();
+                    commands.spawn((
+                        EscapeShard { dir: Vec2::X, spin: rng.gen_range(-4.0..4.0), age: 0.0, verts, trail: Vec::new() },
+                        Transform::from_xyz(0.0, 0.0, 0.0),
+                    ));
+                    sfx.write(SoundFx::Haunt);
+                }
+                continue;
             }
-            if sg.victory <= 0.0 {
-                burst(&mut commands, p, phantom_color(), 90, 620.0, &mut rng);
-                burst(&mut commands, p, Color::srgb(6.0, 6.0, 7.0), 44, 440.0, &mut rng);
-                commands.entity(sge).despawn();
+            // BEAT 2 — SEND-OFF: keep the stage clear; once the core's off-screen the ship follows; then WIN
+            for (re, _rt) in &rocks {
+                commands.entity(re).despawn();
+            }
+            let (shards, departing) = &finale_fx;
+            let shard_gone = shards.is_empty();
+            if !shard_gone {
+                // a CONSTANT STREAM of explosions from around the middle while the core flees — keeps the
+                // screen full of light until it's off-screen (not a single split-second pop)
+                sg.dive -= dt;
+                if sg.dive <= 0.0 {
+                    sg.dive = PHANTOM_BOOM_EVERY;
+                    light_burst_to_edge(&mut commands, Vec2::ZERO, h, 34, Color::srgb(7.0, 7.6, 8.2), &mut rng); // reaches the edge
+                }
+            }
+            let mut launched_ship = false;
+            if shard_gone {
+                // the core has fled the arena → the hero's ship warps off EAST after it (once — then it's gone)
+                for (se, stf2, _) in &ships {
+                    launched_ship = true;
+                    let sp = stf2.translation.truncate();
+                    commands.spawn((DepartingShip { flame: 0.0 }, Transform::from_xyz(sp.x, sp.y, 0.0)));
+                    burst(&mut commands, sp, ship_color(), 30, 320.0, &mut rng);
+                    commands.entity(se).despawn();
+                    sfx.write(SoundFx::Haunt);
+                }
+            }
+            // EVERYTHING cleared (core gone, ship launched AND flown off) — or the safety cap elapsed → WIN
+            if (shard_gone && !launched_ship && departing.is_empty()) || sg.victory <= 0.0 {
+                commands.entity(sge).try_despawn();
                 next.set(GameState::Victory);
             }
             continue;
@@ -5353,33 +5495,34 @@ fn phantom_update(
 
         // ── PHASE CLEARED (this phase's pool is gone) → RESET into the next phase, or WIN on the last ──
         if sg.hp <= 0 {
-            // the apparitions dispel with the phase that made them (and everything on the win)
-            for (de, dtf) in &decoys {
-                burst(&mut commands, dtf.translation.truncate(), phantom_color(), 14, 260.0, &mut rng);
-                commands.entity(de).despawn();
+            // the possessed vessel dispels with the phase that made it (and on the win)
+            for (ve, vtf) in &vessels {
+                burst(&mut commands, vtf.translation.truncate(), phantom_color(), 14, 260.0, &mut rng);
+                commands.entity(ve).despawn();
             }
+            sg.possessed = None;
+            sg.seeking = None;
             if sg.phase >= 3 {
-                // FINALE KILL → begin the death-throes BEAT (the Victory screen comes after — no abrupt cut).
-                // Latch the win now: zero run.respawn so `respawn` (chained after this) can't stomp it with a
-                // same-frame GameOver, and bank the score. The boss is NOT despawned yet — it comes apart below.
+                // FINALE KILL → SET UP the death scene (it plays out in the victory branch above: gather to
+                // the middle → erupt in light → the core flees → the ship follows → Victory). Latch the win:
+                // zero run.respawn so `respawn` can't stomp it with a same-frame GameOver, bank the score, and
+                // hold the arena CALM (pauses the finale spawner). `erupted=false` → it gathers to centre first.
                 run.respawn = 0.0;
                 score.0 += BOSS_SCORE; // the hardest kill in the game — worth as much as any other boss
-                sg.victory = PHANTOM_VICTORY_SECS;
-                // a spectral SHARD tears free and streaks off-screen — a seed for what comes next
-                let dir = Vec2::from_angle(rng.gen_range(0.0..TAU));
-                let verts: Vec<Vec2> = (0..6).map(|k| Vec2::from_angle(k as f32 / 6.0 * TAU) * (7.0 + rng.gen_range(-2.5..2.5))).collect();
-                commands.spawn((
-                    EscapeShard { spin: rng.gen_range(-7.0..7.0), verts },
-                    Velocity(dir * PHANTOM_SHARD_SPEED),
-                    Transform::from_xyz(p.x, p.y, 0.0),
-                ));
-                burst(&mut commands, p, phantom_color(), 60, 500.0, &mut rng);
-                sfx.write(SoundFx::Warp);
+                sg.victory = PHANTOM_VICTORY_SECS; // safety cap (the scene ends when the core + ship have flown off)
+                sg.erupted = false;
+                wave.calm = PHANTOM_VICTORY_SECS + 0.5; // no fresh finale rocks drift in during the scene
+                // shield the ship for the whole send-off: the win often lands on your LAST life, and a stray
+                // hit during the scene must NOT flip the victory into a Game Over.
+                for (_, _, mut sh) in &mut ships {
+                    sh.invuln = sh.invuln.max(PHANTOM_VICTORY_SECS + 0.5);
+                }
+                sfx.write(SoundFx::Haunt);
             } else {
                 sg.transition = PHANTOM_RESET_SECS; // fracture → reset → next phase
                 sg.flash = 0.8;
                 burst(&mut commands, p, phantom_color(), 40, 360.0, &mut rng);
-                sfx.write(SoundFx::Warp);
+                sfx.write(SoundFx::Haunt);
             }
             continue;
         }
@@ -5394,22 +5537,67 @@ fn phantom_update(
                     }
                 }
             }
-            // phase 2: as it fades back out it SHUFFLES — swaps places with a random apparition, so you
-            // can't just camp the one that fired (the shell game resets every window).
-            if sg.vuln <= 0.0 && sg.phase == 2 {
-                let n = decoys.iter().count();
-                if n > 0 {
-                    let pick = rng.gen_range(0..n);
-                    if let Some((_, mut dtf)) = decoys.iter_mut().nth(pick) {
-                        let dp = dtf.translation;
-                        burst(&mut commands, p, phantom_color(), 12, 240.0, &mut rng);
-                        burst(&mut commands, dp.truncate(), phantom_color(), 12, 240.0, &mut rng);
-                        dtf.translation = Vec3::new(p.x, p.y, 0.0);
-                        stf.translation = dp;
+            continue; // it holds still while surfaced — the punish window (every phase)
+        }
+
+        // ── phase 2 — POSSESSION: it hunts a real field rock, glides to it, and DIVES IN — that rock becomes
+        //    a haunted vessel (homes + kills on contact, `possessed_update`) with the ghost hidden inside,
+        //    unhittable. Shooting the vessel breaks it and RIPS the Haunt out (surfaces, above — the punish
+        //    window). Then it hunts the next rock. ──
+        if sg.phase == 2 {
+            if let Some(v) = sg.possessed {
+                if let Ok((_, vtf)) = vessels.get(v) {
+                    // riding the vessel — the ghost stays where the vessel is, so the rip-out lands there
+                    p = vtf.translation.truncate();
+                    stf.translation.x = p.x;
+                    stf.translation.y = p.y;
+                } else {
+                    // the vessel was broken → the Haunt is torn out: SURFACE for the punish window
+                    sg.possessed = None;
+                    sg.seeking = None;
+                    sg.vuln = PHANTOM_MATERIALIZE;
+                    sg.dive = PHANTOM_DIVE_EVERY;
+                    burst(&mut commands, p, phantom_color(), 26, 320.0, &mut rng);
+                    sfx.write(SoundFx::Haunt);
+                }
+            } else if let Some(t) = sg.seeking {
+                // gliding to the rock it fixed on — dive in on arrival (the rock BECOMES the vessel)
+                if let Ok((_, ttf)) = rocks.get(t) {
+                    let tp = ttf.translation.truncate();
+                    if p.distance(tp) <= PHANTOM_POSSESS_R + PHANTOM_SEEK_SPEED * dt {
+                        commands.entity(t).despawn(); // the field rock is consumed…
+                        let verts = asteroid_verts(2, &mut rng);
+                        let e = commands
+                            .spawn((Possessed { hp: PHANTOM_POSSESS_HP, pulse: rng.gen_range(0.0..TAU), verts }, Transform::from_xyz(tp.x, tp.y, 0.0)))
+                            .id(); // …and reborn as the haunted vessel the Haunt now hides in
+                        sg.possessed = Some(e);
+                        sg.seeking = None;
+                        p = tp;
+                        stf.translation.x = p.x;
+                        stf.translation.y = p.y;
+                        burst(&mut commands, tp, phantom_color(), 26, 300.0, &mut rng);
+                        sfx.write(SoundFx::Haunt);
+                    } else {
+                        p += (tp - p).normalize_or_zero() * PHANTOM_SEEK_SPEED * dt; // chase the drifting rock
+                        stf.translation.x = p.x;
+                        stf.translation.y = p.y;
                     }
+                } else {
+                    sg.seeking = None; // the rock it was after is gone (shot away) → fix on another next tick
+                }
+            } else {
+                // between vessels → after the beat, FIX on the nearest field rock and lunge for it
+                sg.dive -= dt;
+                if sg.dive <= 0.0 {
+                    if let Some((t, _)) = rocks.iter().min_by(|(_, a), (_, b)| {
+                        p.distance_squared(a.translation.truncate()).total_cmp(&p.distance_squared(b.translation.truncate()))
+                    }) {
+                        sg.seeking = Some(t); // it fixes on a rock (no cue — kept quiet; the dive-in sounds)
+                    }
+                    // no rock in reach → stay ready, re-check next tick (the finale field keeps trickling in)
                 }
             }
-            continue; // it holds still while surfaced — the punish window
+            continue; // possession replaces the roam + sweep ray in phase 2
         }
 
         // ── phase 3 — the HUNT: the mask drops. It periodically locks your position (aim-telegraph, eyes
@@ -5420,7 +5608,7 @@ fn phantom_update(
                 sg.aim -= dt; // locked and winding up — the dodge window (direction is already fixed)
                 if sg.aim <= 0.0 {
                     sg.charging = PHANTOM_CHARGE_SECS;
-                    sfx.write(SoundFx::Warp); // it lunges with a howl
+                    sfx.write(SoundFx::Haunt); // it lunges with a howl
                 }
             } else if sg.charging > 0.0 {
                 sg.charging -= dt;
@@ -5436,7 +5624,12 @@ fn phantom_update(
                 sg.charge_cool -= dt;
                 if sg.charge_cool <= 0.0 && sg.ray == RayPhase::Idle {
                     if let Some((_, spos, _)) = ship_info {
-                        sg.charge_cool = PHANTOM_CHARGE_EVERY;
+                        // DESPERATION: the more of its final pool you've stripped, the less it waits between
+                        // lunges — from ~PHANTOM_CHARGE_EVERY at full health down to a frantic ~40% of that at
+                        // death's door. The aim/dodge window (PHANTOM_CHARGE_AIM) never shrinks — it just comes
+                        // at you more often, cornered and relentless.
+                        let hpf = (sg.hp as f32 / PHANTOM_PHASE_HP as f32).clamp(0.0, 1.0);
+                        sg.charge_cool = PHANTOM_CHARGE_EVERY * (0.4 + 0.6 * hpf);
                         sg.aim = PHANTOM_CHARGE_AIM;
                         sg.charge_dir = (spos - p).normalize_or(Vec2::X); // locks NOW — sidestep the line
                     }
@@ -5444,13 +5637,20 @@ fn phantom_update(
             }
         }
 
-        // ── ROAM (unhurried Lissajous): holds still while a beam is live or mid-charge-sequence ──
+        // ── ROAM: an unhurried Lissajous drift — but in phase 3 it STALKS, biasing that drift toward the
+        //    ship (harder the more of its final pool you've stripped) so it's always closing in between lunges ──
         if sg.ray == RayPhase::Idle && !hunting {
             let margin = PHANTOM_R + 30.0;
-            let target = Vec2::new(
+            let mut target = Vec2::new(
                 (sg.pulse * 0.17).sin() * (h.x - margin) * 0.62,
                 (sg.pulse * 0.11 + 1.3).sin() * (h.y - margin) * 0.42,
             );
+            if sg.phase >= 3 {
+                if let Some((_, spos, _)) = ship_info {
+                    let hpf = (sg.hp as f32 / PHANTOM_PHASE_HP as f32).clamp(0.0, 1.0);
+                    target = target.lerp(spos, 0.35 + 0.4 * (1.0 - hpf)); // 35% → 75% pull toward the ship as it nears death
+                }
+            }
             p += (target - p) * (1.0 - (-dt * PHANTOM_ROAM_EASE).exp());
             p.x = p.x.clamp(-h.x + margin, h.x - margin);
             p.y = p.y.clamp(-h.y + margin, h.y - margin);
@@ -5461,14 +5661,18 @@ fn phantom_update(
         // ── SWEEP RAY (all phases; faster each): Idle → Telegraph a random quadrant → Fire → SURFACE ──
         // `ray_arc` is Some((lo, hi)) on frames the beam is live: the arc of bearings it crossed THIS frame.
         let mut ray_arc: Option<(f32, f32)> = None;
-        if !hunting {
+        if !hunting && sg.phase == 1 {
+        // the Sweep Ray is PHASE 1's signature only — p2 possesses, p3 just charges (no beam)
         match sg.ray {
             RayPhase::Idle => {
                 sg.ray_cool -= dt;
                 if sg.ray_cool <= 0.0 {
-                    let q = rng.gen_range(0..4); // one of the four quadrants, with a little jitter
-                    sg.ray_from = q as f32 * PHANTOM_RAY_QUADRANT + rng.gen_range(-0.12f32..0.12);
-                    sg.ray_span = if rng.gen_bool(0.5) { PHANTOM_RAY_QUADRANT } else { -PHANTOM_RAY_QUADRANT };
+                    // AIM at the player — centre the swept quadrant on the ship's bearing so the beam crosses
+                    // the corner it's nearest (a little jitter so it isn't pixel-perfect; the ~1.7s telegraph
+                    // is the dodge window). Falls back to a random bearing if there's somehow no ship.
+                    let bearing = ship_info.map(|(_, sp, _)| (sp - p).to_angle()).unwrap_or_else(|| rng.gen_range(0.0..TAU));
+                    sg.ray_from = bearing - PHANTOM_RAY_QUADRANT * 0.5 + rng.gen_range(-0.15f32..0.15);
+                    sg.ray_span = PHANTOM_RAY_QUADRANT;
                     sg.ray_t = 0.0;
                     sg.ray = RayPhase::Telegraph;
                 }
@@ -5478,7 +5682,7 @@ fn phantom_update(
                 if sg.ray_t >= PHANTOM_RAY_TELEGRAPH {
                     sg.ray_t = 0.0;
                     sg.ray = RayPhase::Fire;
-                    sfx.write(SoundFx::Warp); // the beam ignites with a rising howl
+                    sfx.write(SoundFx::Haunt); // the beam ignites with a rising howl
                 }
             }
             RayPhase::Fire => {
@@ -5531,22 +5735,38 @@ fn phantom_update(
     }
 }
 
-// Phase-2 apparitions: each roams the same unhurried Lissajous as the real Phantom, offset by its `seed`,
-// so the pack disperses and stays interleaved — indistinguishable until one of them attacks.
-fn phantom_decoy_update(time: Res<Time>, arena: Res<Arena>, mut decoys: Query<(&mut Transform, &mut PhantomDecoy)>) {
+// Phase-2 VESSELS: each possessed rock homes at the ship and kills on contact while the Haunt hides inside.
+// Its HP is chipped by gunfire in `collisions`; here it just hunts, and self-destructs once broken (which
+// `phantom_update` sees as the vessel vanishing → it rips the Haunt out into the open).
+fn possessed_update(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut run: ResMut<Run>,
+    mut next: ResMut<NextState<GameState>>,
+    mut sfx: EventWriter<SoundFx>,
+    dev: Res<Dev>,
+    mut vessels: Query<(Entity, &mut Transform, &mut Possessed)>,
+    ships: Query<(Entity, &Transform, &Ship), Without<Possessed>>,
+) {
     let dt = time.delta_secs();
-    let h = arena.half;
-    let margin = PHANTOM_R + 30.0;
-    for (mut tf, mut d) in &mut decoys {
-        d.pulse += dt * 3.0;
-        let p = tf.translation.truncate();
-        let target = Vec2::new(
-            (d.pulse * 0.17 + d.seed).sin() * (h.x - margin) * 0.62,
-            (d.pulse * 0.11 + 1.3 + d.seed * 0.7).sin() * (h.y - margin) * 0.42,
-        );
-        let np = p + (target - p) * (1.0 - (-dt * PHANTOM_ROAM_EASE).exp());
-        tf.translation.x = np.x.clamp(-h.x + margin, h.x - margin);
-        tf.translation.y = np.y.clamp(-h.y + margin, h.y - margin);
+    let mut rng = rand::thread_rng();
+    let ship = ships.iter().next().map(|(e, t, sh)| (e, t.translation.truncate(), immune(sh, &dev)));
+    for (e, mut tf, mut pv) in &mut vessels {
+        pv.pulse += dt * 4.0;
+        if pv.hp <= 0 {
+            burst(&mut commands, tf.translation.truncate(), phantom_color(), 28, 340.0, &mut rng); // vessel shatters
+            commands.entity(e).despawn();
+            continue;
+        }
+        let vp = tf.translation.truncate();
+        if let Some((se, spos, imm)) = ship {
+            let np = vp + (spos - vp).clamp_length_max(PHANTOM_POSSESS_SPEED * dt); // HOME toward the ship
+            tf.translation.x = np.x;
+            tf.translation.y = np.y;
+            if run.respawn <= 0.0 && !imm && np.distance(spos) < PHANTOM_POSSESS_R + SHIP_R {
+                kill_ship(&mut commands, &mut run, &mut next, &mut sfx, se, spos, &mut rng);
+            }
+        }
     }
 }
 
@@ -5580,18 +5800,75 @@ fn spectral_trail_update(
     }
 }
 
-// The victory shard streaks off-screen (spins as it flies) after the finale kill, then is culled — the
-// spectral seed for whatever comes next. Purely cosmetic; no collision.
-fn escape_shard_update(time: Res<Time>, mut commands: Commands, arena: Res<Arena>, mut shards: Query<(Entity, &mut Transform, &mut EscapeShard, &Velocity)>) {
+// The Haunt's true-form core, having torn free of the shattered shell, flees off-screen after the finale
+// kill — slow at first, then accelerating (ease-in) so the escape reads as a deliberate scene, not a blip.
+// Culled once it clears the arena. Purely cosmetic; no collision — the sequel seed.
+fn escape_shard_update(time: Res<Time>, mut commands: Commands, arena: Res<Arena>, mut shards: Query<(Entity, &mut Transform, &mut EscapeShard)>) {
     let dt = time.delta_secs();
     let h = arena.half;
-    for (e, mut tf, mut sh, v) in &mut shards {
-        tf.translation.x += v.0.x * dt;
-        tf.translation.y += v.0.y * dt;
-        sh.spin += dt * 4.5;
-        let p = tf.translation.truncate();
-        if p.x.abs() > h.x + 60.0 || p.y.abs() > h.y + 60.0 {
+    for (e, mut tf, mut sh) in &mut shards {
+        sh.age += dt;
+        sh.spin += dt * 3.0;
+        // ease-IN: it rips loose slowly, then streaks away as it gathers speed
+        let ramp = (sh.age / PHANTOM_SHARD_RAMP).clamp(0.0, 1.0);
+        let speed = PHANTOM_SHARD_MIN_SPEED + (PHANTOM_SHARD_MAX_SPEED - PHANTOM_SHARD_MIN_SPEED) * ramp * ramp;
+        let p = tf.translation.truncate() + sh.dir * speed * dt;
+        tf.translation.x = p.x;
+        tf.translation.y = p.y;
+        sh.trail.push(p); // lay down the comet streak
+        if sh.trail.len() > 24 {
+            sh.trail.remove(0);
+        }
+        if p.x.abs() > h.x + 90.0 || p.y.abs() > h.y + 90.0 {
             commands.entity(e).despawn(); // gone — off into the dark
+        }
+    }
+}
+
+// The hero's ship warping off EAST after the finale — a cosmetic entity (no player control, no bounds
+// clamp) flown off-screen trailing thrust sparks, then culled. Spawned once the escaping shard has left.
+fn departing_ship_update(time: Res<Time>, mut commands: Commands, arena: Res<Arena>, mut ships: Query<(Entity, &mut Transform, &mut DepartingShip)>) {
+    let dt = time.delta_secs();
+    let mut rng = rand::thread_rng();
+    let h = arena.half;
+    for (e, mut tf, mut ds) in &mut ships {
+        tf.translation.x += SHIP_DEPART_SPEED * dt; // straight east, off the edge
+        ds.flame += dt * 40.0;
+        if rng.gen_bool(0.6) {
+            let tail = tf.translation.truncate() - Vec2::new(SHIP_R * 0.5, 0.0);
+            commands.spawn((
+                Particle { vel: Vec2::new(-rng.gen_range(140.0..240.0), rng.gen_range(-30.0..30.0)), life: 0.3, ttl: 0.3, color: flame_color() },
+                Transform::from_xyz(tail.x, tail.y, 0.0),
+            ));
+        }
+        if tf.translation.x > h.x + 80.0 {
+            commands.entity(e).despawn(); // gone — off after the shard
+        }
+    }
+}
+
+// The Haunt's spectral body UNMAKES any asteroid it drifts through, so it never just clips a rock (it IS a
+// ghost — matter dissolves in its wake). Spares the rock it's currently hunting to possess (p2); idle while
+// it glides in, powers up, or is dying.
+fn phantom_dissolve(
+    mut commands: Commands,
+    phantoms: Query<(&Transform, &Phantom)>,
+    rocks: Query<(Entity, &Transform), (With<Asteroid>, Without<Phantom>, Without<Gold>)>,
+) {
+    let mut rng = rand::thread_rng();
+    for (ptf, ph) in &phantoms {
+        if !ph.entered || ph.charge > 0.0 || ph.victory > 0.0 {
+            continue;
+        }
+        let p = ptf.translation.truncate();
+        for (re, rt) in &rocks {
+            if Some(re) == ph.seeking {
+                continue; // spare the rock it's flying to possess
+            }
+            if p.distance(rt.translation.truncate()) < PHANTOM_R {
+                burst(&mut commands, rt.translation.truncate(), phantom_color(), 6, 200.0, &mut rng);
+                commands.entity(re).despawn();
+            }
         }
     }
 }
@@ -5843,12 +6120,12 @@ fn render_boss(
     pulsars: Query<(&Pulsar, &Transform)>,
     phantoms: Query<(&Phantom, &Transform)>,
     // the Haunt's extra visuals bundled into one param (three separate queries would exceed Bevy's 16-param limit)
-    haunt: (Query<(&PhantomDecoy, &Transform)>, Query<(&SpectralTrail, &Transform)>, Query<(&EscapeShard, &Transform)>),
+    haunt: (Query<(&Possessed, &Transform)>, Query<(&SpectralTrail, &Transform)>, Query<(&EscapeShard, &Transform)>, Query<(&DepartingShip, &Transform)>),
     prime_targets: Query<&Transform, With<Asteroid>>,
     cannonballs: Query<(&Cannonball, &Transform)>,
     players: Query<&Transform, (With<Ship>, Without<Slinger>)>,
 ) {
-    let (decoys, trails, shards) = haunt;
+    let (vessels, trails, shards, departing) = haunt;
     let h = arena.half;
     let t = time.elapsed_secs();
     let mc = boss_color();
@@ -5930,8 +6207,24 @@ fn render_boss(
     //    it dims + reforms during a reset, flashes on each phase break, and fires its Sweep Ray. ──
     for (sg, stf) in &phantoms {
         let c = stf.translation.truncate();
-        // beaten → the mask shrinks as it comes apart over the death-throes beat
-        let hr = PHANTOM_R * if sg.victory > 0.0 { (sg.victory / PHANTOM_VICTORY_SECS).clamp(0.06, 1.0) } else { 1.0 };
+        // ── DEATH SCENE render: two beats. GATHER — the boss is drawn back to the middle (its form dimming);
+        //    ERUPT — it's gone, replaced by a bright flash-glow at centre that blows outward + fades (the big
+        //    light is particles). The fleeing core + departing ship draw separately below. ──
+        if sg.victory > 0.0 {
+            if !sg.erupted {
+                let sc = mix(phantom_color(), Color::srgb(6.0, 1.6, 3.4), 0.5); // its phase-3 hue, dimming
+                draw_haunt_skull(&mut gizmos, c, PHANTOM_R, dim(sc, 0.7), 1.0, sg.pulse, false, 0.4);
+            } else {
+                let f = (1.0 - (PHANTOM_VICTORY_SECS - sg.victory - 0.7) / 0.7).clamp(0.0, 1.0); // bloom + fade over ~0.7s
+                if f > 0.0 {
+                    let glow = Color::srgb(7.0, 7.6, 8.2);
+                    gizmos.circle_2d(Isometry2d::from_translation(Vec2::ZERO), PHANTOM_R * (0.5 + 4.0 * (1.0 - f)), dim(glow, f * f));
+                    gizmos.circle_2d(Isometry2d::from_translation(Vec2::ZERO), PHANTOM_R * 0.6 * f, dim(glow, f));
+                }
+            }
+            continue; // custom death visuals — skip the normal skull/ray render
+        }
+        let hr = PHANTOM_R;
         // per-phase morph: spectral base → chartreuse (p2) → hot rose (p3)
         let sc = match sg.phase {
             1 => phantom_color(),
@@ -5963,7 +6256,10 @@ fn render_boss(
         let solid = surfaced || sg.phase >= 3; // phase 3 is solid full-time — no ghost waver
         // `open`: the mask SPLITS around its searing core through the surface window, sealing as it closes
         let open = if surfaced { (sg.vuln / PHANTOM_MATERIALIZE).clamp(0.0, 1.0) } else { 0.0 };
-        draw_haunt_skull(&mut gizmos, c, hr, body, ember, sg.pulse, !solid, open);
+        // while it's hiding INSIDE a possessed vessel (p2) the ghost isn't drawn — only the vessel is
+        if !(sg.phase == 2 && sg.possessed.is_some()) {
+            draw_haunt_skull(&mut gizmos, c, hr, body, ember, sg.pulse, !solid, open);
+        }
         // phase-3 AIM telegraph: the locked charge line flashes ahead of the dash — sidestep it
         if sg.aim > 0.0 {
             let frac = 1.0 - (sg.aim / PHANTOM_CHARGE_AIM).clamp(0.0, 1.0);
@@ -5976,7 +6272,7 @@ fn render_boss(
             gizmos.circle_2d(Isometry2d::from_translation(c), hr * (1.2 + 5.0 * (1.0 - f)), dim(Color::srgb(7.0, 8.0, 8.0), f));
         }
         // ── Sweep Ray: a pulsing warning wedge while telegraphing, then the lethal beam mid-sweep ──
-        let ray_len = h.length() + 40.0;
+        let ray_len = h.length() * 2.0 + 40.0; // FULL arena diagonal (matches phantom_update) — reaches the far edge from anywhere
         let rc = phantom_ray_color();
         match sg.ray {
             RayPhase::Telegraph => {
@@ -6001,21 +6297,26 @@ fn render_boss(
             }
             RayPhase::Idle => {}
         }
-        // per-phase HP bar (refills each phase) + three phase pips showing progress through the fight
+        // per-phase HP bar (refills on each phase reset — its resets already read the phase progress)
         boss_hp_bar(&mut gizmos, h.y - 42.0, sg.hp as f32 / PHANTOM_PHASE_HP as f32, sc);
-        for k in 0..3usize {
-            let pip = Vec2::new((k as f32 - 1.0) * 22.0, h.y - 30.0);
-            gizmos.circle_2d(Isometry2d::from_translation(pip), 5.0, if k < sg.phase as usize { sc } else { dim(sc, 0.22) });
-        }
     }
 
-    // ── phase-2 decoy apparitions: drawn EXACTLY like the idle ghost (same skull, same shimmer, same idle
-    //    ember) — the only tell is that a decoy's eyes never blaze, because it never attacks ──
-    for (d, dtf) in &decoys {
-        let c = dtf.translation.truncate();
-        let sc = mix(phantom_color(), detonator_color(), 0.4); // decoys exist only in phase 2 — its hue
-        let body = dim(sc, 0.5 + 0.12 * (d.pulse * 1.7).sin());
-        draw_haunt_skull(&mut gizmos, c, PHANTOM_R, body, 0.25, d.pulse, true, 0.0);
+    // ── phase-2 VESSELS: the haunted rock the Haunt is hiding in — a jagged chunk lit with a pulsing
+    //    possessed glow, two ember eyes peering out (so you know which rock to break) ──
+    for (pv, pvt) in &vessels {
+        let c = pvt.translation.truncate();
+        let glow = 0.6 + 0.4 * pv.pulse.sin();
+        let hue = mix(phantom_color(), Color::srgb(6.0, 1.6, 3.4), 0.4); // hot-spectral — clearly not a normal rock
+        let pts: Vec<Vec2> = pv.verts.iter().map(|v| c + *v).collect();
+        let mut loop_pts = pts.clone();
+        if let Some(&first) = loop_pts.first() {
+            loop_pts.push(first);
+        }
+        gizmos.linestrip_2d(loop_pts, dim(hue, 0.65 + 0.35 * glow));
+        gizmos.circle_2d(Isometry2d::from_translation(c), PHANTOM_POSSESS_R * (0.5 + 0.15 * glow), dim(hue, 0.3 * glow));
+        for side in [-1.0f32, 1.0] {
+            gizmos.circle_2d(Isometry2d::from_translation(c + Vec2::new(side * PHANTOM_POSSESS_R * 0.28, PHANTOM_POSSESS_R * 0.12)), PHANTOM_POSSESS_R * 0.09, dim(phantom_ray_color(), glow));
+        }
     }
 
     // ── phase-3 spectral wake: each afterimage burns bright then gutters out as its ttl fades ──
@@ -6025,15 +6326,47 @@ fn render_boss(
         gizmos.circle_2d(Isometry2d::from_translation(c), PHANTOM_TRAIL_R * (0.5 + 0.5 * f), dim(phantom_ray_color(), 0.15 + 0.55 * f));
     }
 
-    // ── the victory shard: a small jagged chunk of the beaten Phantom, spinning as it streaks off-screen ──
+    // ── the fleeing TRUE-FORM CORE (the sequel seed): deliberately SUBTLE — a small pale chunk streaking
+    //    east, easy to lose among the burst of light unless you're really watching for it ──
     for (sh, stf) in &shards {
         let c = stf.translation.truncate();
+        let core = mix(phantom_color(), Color::srgb(6.0, 6.0, 7.0), 0.5); // pale, not blazing
+        // a faint short comet streak
+        let n = sh.trail.len();
+        for i in 1..n {
+            let f = i as f32 / n as f32;
+            gizmos.line_2d(sh.trail[i - 1], sh.trail[i], dim(core, 0.03 + 0.22 * f));
+        }
+        // the little chunk (spinning) — no bright halo, just a small silhouette + a dim pinpoint
         let pts: Vec<Vec2> = sh.verts.iter().map(|v| c + Vec2::from_angle(sh.spin).rotate(*v)).collect();
         let mut loop_pts = pts.clone();
         if let Some(&first) = loop_pts.first() {
             loop_pts.push(first);
         }
-        gizmos.linestrip_2d(loop_pts, phantom_color());
+        gizmos.linestrip_2d(loop_pts, dim(core, 0.8));
+        gizmos.circle_2d(Isometry2d::from_translation(c), 1.6, dim(core, 0.9));
+    }
+
+    // ── the hero's DEPARTING ship: warps off east after the shard — a ship silhouette (nose east) with a
+    //    hard thrust flame streaming behind it ──
+    for (ds, dtf) in &departing {
+        let c = dtf.translation.truncate();
+        let sc = ship_color();
+        // thrust flame out the back (west), flickering
+        let fl = 0.7 + 0.3 * ds.flame.sin();
+        gizmos.linestrip_2d(
+            [c + Vec2::new(-SHIP_R * 0.5, -5.0), c + Vec2::new(-SHIP_R * 0.5 - 22.0 * fl, 0.0), c + Vec2::new(-SHIP_R * 0.5, 5.0)],
+            dim(flame_color(), fl),
+        );
+        // hull (nose = +X = east)
+        let hull = [
+            Vec2::new(SHIP_R, 0.0),
+            Vec2::new(-SHIP_R * 0.7, -SHIP_R * 0.7),
+            Vec2::new(-SHIP_R * 0.4, 0.0),
+            Vec2::new(-SHIP_R * 0.7, SHIP_R * 0.7),
+            Vec2::new(SHIP_R, 0.0),
+        ];
+        gizmos.linestrip_2d(hull.iter().map(|v| c + *v).collect::<Vec<_>>(), sc);
     }
 
     // cameo: the boss THAT'S ACTUALLY COMING drifts by in the background during the run-up — its own
@@ -7376,6 +7709,7 @@ enum SoundFx {
     EnemyDie,  // an enemy mob destroyed
     Warp,      // the warp/black-hole launch
     Toggle,    // switching standard ↔ mass shot
+    Haunt,     // the Phantom's own spectral cue (ray, possession, death) — NOT the warp sound
 }
 
 // Pre-synthesized SFX clips (see `audio.rs`), built once at startup.
@@ -7388,6 +7722,7 @@ struct SfxBank {
     enemy_shot: Handle<AudioSource>,
     enemy_die: Handle<AudioSource>,
     warp: Handle<AudioSource>,
+    haunt: Handle<AudioSource>, // the Phantom's spectral cue
     achievement: Handle<AudioSource>,
     life: Handle<AudioSource>, // gold-rock 1UP jingle
     toggle: Handle<AudioSource>, // standard ↔ mass shot switch
@@ -7402,6 +7737,7 @@ fn start_sfx(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
         enemy_shot: sources.add(AudioSource { bytes: audio::enemy_shot_wav().into() }),
         enemy_die: sources.add(AudioSource { bytes: audio::enemy_die_wav().into() }),
         warp: sources.add(AudioSource { bytes: audio::warp_wav().into() }),
+        haunt: sources.add(AudioSource { bytes: audio::haunt_sfx_wav().into() }),
         achievement: sources.add(AudioSource { bytes: audio::achievement_sfx_wav().into() }),
         life: sources.add(AudioSource { bytes: audio::life_sfx_wav().into() }),
         toggle: sources.add(AudioSource { bytes: audio::toggle_sfx_wav().into() }),
@@ -7425,8 +7761,8 @@ fn play_sfx(mut commands: Commands, bank: Option<Res<SfxBank>>, mut events: Even
         events.clear();
         return;
     };
-    let (mut fire, mut mine, mut death, mut eshot, mut edie, mut warp, mut toggle) =
-        (false, false, false, false, false, false, false);
+    let (mut fire, mut mine, mut death, mut eshot, mut edie, mut warp, mut toggle, mut haunt) =
+        (false, false, false, false, false, false, false, false);
     let mut brk: Option<u8> = None; // deepest (largest) rock that broke this frame
     for e in events.read() {
         match e {
@@ -7438,6 +7774,7 @@ fn play_sfx(mut commands: Commands, bank: Option<Res<SfxBank>>, mut events: Even
             SoundFx::EnemyDie => edie = true,
             SoundFx::Warp => warp = true,
             SoundFx::Toggle => toggle = true,
+            SoundFx::Haunt => haunt = true,
         }
     }
     if fire {
@@ -7463,6 +7800,9 @@ fn play_sfx(mut commands: Commands, bank: Option<Res<SfxBank>>, mut events: Even
     }
     if warp {
         one_shot(&mut commands, bank.warp.clone(), 0.6); // the ultimate — a big, distinct whoosh
+    }
+    if haunt {
+        one_shot(&mut commands, bank.haunt.clone(), 0.35); // the Phantom's spectral cue — present, not naggy
     }
     if toggle {
         one_shot(&mut commands, bank.toggle.clone(), 0.4); // weapon-switch click
@@ -7674,7 +8014,7 @@ fn main() {
                 .chain()
                 .run_if(in_state(GameState::Playing)),
         )
-        .add_systems(Update, (phantom_decoy_update, spectral_trail_update, escape_shard_update).run_if(in_state(GameState::Playing))) // the Haunt's p2 apparitions + p3 wake + victory shard (no ordering needs — kept off the main chain)
+        .add_systems(Update, (possessed_update, phantom_dissolve, spectral_trail_update, escape_shard_update, departing_ship_update).run_if(in_state(GameState::Playing))) // the Haunt's p2 vessels, its rock-dissolving body, p3 wake + the finale's fleeing core & departing ship (no ordering needs — kept off the main chain)
         .add_systems(Update, (music_director, play_sfx))
         .add_systems(Update, menu_start.run_if(in_state(GameState::Menu)))
         .add_systems(
@@ -8758,6 +9098,30 @@ mod tests {
     }
 
     #[test]
+    fn a_red_absorbs_another_red_in_a_mono_pack() {
+        // the wave-30 finale spawns all-red groups: with no other kind to eat, a red must still be able to
+        // consume a fellow red (and the pair must NOT annihilate each other — one grows, one is gone).
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.world_mut().spawn((
+            Asteroid { size: 1, verts: vec![Vec2::X * 15.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 },
+            Red { cool: 0.0 },
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+        app.world_mut().spawn((
+            Asteroid { size: 1, verts: vec![Vec2::X * 15.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 },
+            Red { cool: 0.0 },
+            Transform::from_xyz(40.0, 0.0, 0.0), // within RED_ABSORB_R
+        ));
+        app.add_systems(Update, red_growth);
+        app.update();
+        let reds = app.world_mut().query_filtered::<&Asteroid, With<Red>>().iter(app.world()).collect::<Vec<_>>().len();
+        assert_eq!(reds, 1, "one red eats the other — an all-red pack consolidates instead of drifting inert");
+        let grown = app.world_mut().query::<(&Asteroid, &Red)>().iter(app.world()).next().unwrap().0.size;
+        assert_eq!(grown, 2, "the surviving red swelled a size from the meal");
+    }
+
+    #[test]
     fn a_red_shot_splits_into_smaller_reds() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
@@ -8862,24 +9226,35 @@ mod tests {
         app.insert_resource(Dev::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(NextState::<GameState>::default());
-        // the FINAL phase's core just dropped → a death-throes BEAT runs first (not an instant screen)
+        // the FINAL phase's pool just emptied → the death SCENE sets up (NOT an instant Victory screen)
         let mut ph = Phantom::new(0, true, 0.0);
         ph.phase = 3; // clearing the last phase wins; earlier phases only reset
         let boss = app.world_mut().spawn((ph, Transform::from_xyz(0.0, 0.0, 0.0))).id();
         app.insert_resource(Score(0));
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
         app.add_systems(Update, phantom_update);
         app.update();
-        let p = app.world().entity(boss).get::<Phantom>().unwrap();
-        assert!(p.victory > 0.0, "the finale kill starts the death-throes beat");
-        assert!(!matches!(app.world().resource::<NextState<GameState>>(), NextState::Pending(GameState::Victory)), "the Victory screen doesn't pop on the kill frame");
+        {
+            let p = app.world().entity(boss).get::<Phantom>().unwrap();
+            assert!(p.victory > 0.0, "the finale kill starts the death scene");
+            assert!(!p.erupted, "it gathers to the middle first — hasn't erupted yet");
+        }
+        assert!(!matches!(app.world().resource::<NextState<GameState>>(), NextState::Pending(GameState::Victory)), "the Victory screen does NOT pop while the send-off plays");
         assert_eq!(app.world().resource::<Score>().0, BOSS_SCORE, "the kill banks the finale score");
-        assert_eq!(app.world_mut().query::<&EscapeShard>().iter(app.world()).count(), 1, "a spectral shard tears free and streaks off");
-        // run the beat down to its end → NOW the Victory screen, and the boss is gone
-        app.world_mut().entity_mut(boss).get_mut::<Phantom>().unwrap().victory = 0.0001;
+        // the boss is already at centre → next tick it ERUPTS and the true-form core tears free east
+        app.update();
+        assert!(app.world().entity(boss).get::<Phantom>().unwrap().erupted, "gathered in → erupts");
+        assert_eq!(app.world_mut().query::<&EscapeShard>().iter(app.world()).count(), 1, "the true-form core tears free and flees east");
+        // the core flies off the arena (simulate it gone). With no ship left to launch, the send-off is
+        // complete → NOW the Victory screen, and the boss is despawned.
+        let shards: Vec<Entity> = app.world_mut().query_filtered::<Entity, With<EscapeShard>>().iter(app.world()).collect();
+        for e in shards {
+            app.world_mut().entity_mut(e).despawn();
+        }
         app.update();
         assert!(
             matches!(app.world().resource::<NextState<GameState>>(), NextState::Pending(GameState::Victory)),
-            "once the beat elapses, the run transitions to the Victory screen"
+            "once everything's cleared, the run transitions to the Victory screen"
         );
         assert_eq!(app.world_mut().query::<&Phantom>().iter(app.world()).count(), 0, "and the boss is despawned");
     }
@@ -8904,6 +9279,7 @@ mod tests {
         app.world_mut()
             .spawn((Asteroid { size: 3, verts: vec![Vec2::X * 88.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 }, Velocity(Vec2::ZERO), Transform::from_xyz(200.0, 0.0, 0.0)));
         app.insert_resource(Score(0));
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
         app.add_systems(Update, phantom_update);
         app.update();
         assert_eq!(app.world_mut().query::<&Asteroid>().iter(app.world()).count(), 0, "the sweeping beam vaporizes a rock in its path");
@@ -8922,6 +9298,7 @@ mod tests {
         let ph = Phantom::new(0, true, 0.0); // phase 1 (default), pool depleted
         let boss = app.world_mut().spawn((ph, Transform::from_xyz(0.0, 0.0, 0.0))).id();
         app.insert_resource(Score(0));
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
         app.add_systems(Update, phantom_update);
         app.update();
         let p = app.world().entity(boss).get::<Phantom>().unwrap();
@@ -8950,31 +9327,75 @@ mod tests {
     }
 
     #[test]
-    fn entering_phase_2_fractures_into_decoys() {
-        // the reset into phase 2 completes → the SPLIT: identical apparitions scatter from the reform point
-        let mut app = phantom_app(0, |ph| {
-            ph.transition = f32::EPSILON; // reset all but done — completes on the first real tick
+    fn phase_2_seeks_and_possesses_a_field_rock() {
+        // phase 2 hunts an EXISTING field rock, glides to it, and dives IN (that rock becomes the vessel) —
+        // it does NOT conjure one from nothing
+        let mut app = phantom_app(PHANTOM_PHASE_HP, |ph| {
+            ph.phase = 2;
+            ph.dive = 0.0; // the beat has elapsed → it goes hunting this tick
         });
-        app.insert_resource(Score(0));
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
+        // a field rock sitting on the ghost so the glide reaches it at once
+        let rock = app
+            .world_mut()
+            .spawn((Asteroid { size: 2, verts: vec![Vec2::X * 20.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)))
+            .id();
+        let boss = app.world_mut().query_filtered::<Entity, With<Phantom>>().iter(app.world()).next().unwrap();
         app.add_systems(Update, phantom_update);
-        app.update(); // establishes time (dt = 0 on the very first frame)
-        app.update(); // a real dt elapses the reset
-        let ph = app.world_mut().query::<&Phantom>().iter(app.world()).next().unwrap();
-        assert_eq!(ph.phase, 2, "the completed reset advanced to phase 2");
-        let n = app.world_mut().query::<&PhantomDecoy>().iter(app.world()).count();
-        assert_eq!(n, PHANTOM_DECOYS, "…and the split spawned the apparitions");
+        app.update(); // fixes on the field rock (seeking) rather than conjuring one
+        assert_eq!(app.world().entity(boss).get::<Phantom>().unwrap().seeking, Some(rock), "it seeks an existing field rock");
+        assert!(app.world().entity(boss).get::<Phantom>().unwrap().possessed.is_none(), "…and hasn't dived in yet");
+        app.update(); // reaches the rock (it's right on it) → dives in
+        assert!(app.world().entity(boss).get::<Phantom>().unwrap().possessed.is_some(), "on reaching it, it possesses the rock");
+        assert_eq!(app.world_mut().query::<&Possessed>().iter(app.world()).count(), 1, "the rock is reborn as one haunted vessel");
+        assert_eq!(app.world_mut().query::<&Asteroid>().iter(app.world()).count(), 0, "the possessed field rock is consumed");
     }
 
     #[test]
-    fn clearing_phase_2_dispels_the_decoys() {
-        let mut app = phantom_app(0, |ph| ph.phase = 2); // phase 2's pool just emptied
-        app.world_mut().spawn((PhantomDecoy { pulse: 0.0, seed: 1.0 }, Transform::from_xyz(200.0, 0.0, 0.0)));
-        app.world_mut().spawn((PhantomDecoy { pulse: 0.0, seed: 2.0 }, Transform::from_xyz(-200.0, 0.0, 0.0)));
-        app.insert_resource(Score(0));
+    fn clearing_phase_2_dispels_the_vessel() {
+        // phase 2's pool empties → the possessed vessel dispels with the phase (like the decoys used to)
+        let mut app = phantom_app(0, |ph| ph.phase = 2);
+        app.world_mut().spawn((Possessed { hp: PHANTOM_POSSESS_HP, pulse: 0.0, verts: vec![Vec2::X * 20.0] }, Transform::from_xyz(200.0, 0.0, 0.0)));
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
         app.add_systems(Update, phantom_update);
         app.update();
-        let n = app.world_mut().query::<&PhantomDecoy>().iter(app.world()).count();
-        assert_eq!(n, 0, "the apparitions dispel with the phase that made them");
+        assert_eq!(app.world_mut().query::<&Possessed>().iter(app.world()).count(), 0, "the vessel dispels with the phase that made it");
+    }
+
+    #[test]
+    fn breaking_the_vessel_rips_the_haunt_out() {
+        // while its vessel holds the Haunt stays hidden; destroy the vessel and it's torn out into the open
+        let mut app = phantom_app(PHANTOM_PHASE_HP, |ph| ph.phase = 2);
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
+        let vessel = app.world_mut().spawn((Possessed { hp: PHANTOM_POSSESS_HP, pulse: 0.0, verts: vec![Vec2::X * 20.0] }, Transform::from_xyz(100.0, 0.0, 0.0))).id();
+        let boss = app.world_mut().query_filtered::<Entity, With<Phantom>>().iter(app.world()).next().unwrap();
+        app.world_mut().entity_mut(boss).get_mut::<Phantom>().unwrap().possessed = Some(vessel);
+        app.add_systems(Update, phantom_update);
+        app.update(); // rides the vessel — hidden, not yet exposed
+        {
+            let ph = app.world().entity(boss).get::<Phantom>().unwrap();
+            assert!(ph.possessed.is_some() && ph.vuln <= 0.0, "while the vessel holds, the Haunt stays hidden inside it");
+        }
+        app.world_mut().entity_mut(vessel).despawn(); // the vessel is broken
+        app.update();
+        let ph = app.world().entity(boss).get::<Phantom>().unwrap();
+        assert!(ph.possessed.is_none() && ph.vuln > 0.0, "breaking the vessel rips the Haunt out — surfaced for the punish window");
+    }
+
+    #[test]
+    fn gunfire_breaks_a_possessed_vessel() {
+        // a shot on the vessel chips its hp — the entry point for forcing the Haunt out
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_event::<SoundFx>();
+        app.insert_resource(Stats::default());
+        app.insert_resource(RunFlags::default());
+        app.insert_resource(Score(0));
+        let vessel = app.world_mut().spawn((Possessed { hp: 1, pulse: 0.0, verts: vec![Vec2::X * 20.0] }, Transform::from_xyz(0.0, 0.0, 0.0))).id();
+        app.world_mut().spawn((Bullet { life: 1.0, trail: Vec::new(), mass: false }, Velocity(Vec2::ZERO), Transform::from_xyz(0.0, 0.0, 0.0)));
+        app.add_systems(Update, collisions);
+        app.update();
+        assert!(app.world().entity(vessel).get::<Possessed>().unwrap().hp <= 0, "a shot chips the vessel's hp toward breaking");
     }
 
     #[test]
@@ -8986,6 +9407,7 @@ mod tests {
             ph.ray_cool = 999.0; // isolate the charge
         });
         app.insert_resource(Score(0));
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
         app.add_systems(Update, phantom_update);
         app.update();
         let n = app.world_mut().query::<&SpectralTrail>().iter(app.world()).count();
@@ -9000,6 +9422,7 @@ mod tests {
             ph.ray_t = PHANTOM_RAY_FIRE; // the sweep completes on the next tick
         });
         app.insert_resource(Score(0));
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
         app.add_systems(Update, phantom_update);
         app.update();
         let ph = app.world_mut().query::<&Phantom>().iter(app.world()).next().unwrap();
@@ -9024,6 +9447,7 @@ mod tests {
             // the ship overlapping the boss
             app.world_mut().spawn((Ship { angle: 0.0, cooldown: 0.0, invuln: 0.0, flame: 0.0 }, Velocity(Vec2::ZERO), Transform::from_xyz(10.0, 0.0, 0.0)));
             app.insert_resource(Score(0));
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
         app.add_systems(Update, phantom_update);
             app.update();
             app.world().resource::<Run>().lives
@@ -9061,10 +9485,10 @@ mod tests {
         app.world_mut().spawn((Detonator { hp: 1, entered: true, charge: 0.0, cool: 0.0, prime: 0.0, target: None, pulse: 0.0, dying: 0.0 }, Transform::default()));
         app.world_mut().spawn((Pulsar { hp: 1, entered: true, charge: 0.0, phase: 0.0, shock_cool: 0.0, pulse: 0.0, dying: 0.0 }, Transform::default()));
         app.world_mut().spawn((Phantom::new(1, true, 0.0), Transform::default()));
-        app.world_mut().spawn((PhantomDecoy { pulse: 0.0, seed: 1.0 }, Transform::default()));
+        app.world_mut().spawn((Possessed { hp: PHANTOM_POSSESS_HP, pulse: 0.0, verts: vec![Vec2::X * 20.0] }, Transform::default()));
         app.world_mut().spawn((SpectralTrail { ttl: 1.0 }, Transform::default()));
         let n = app.world_mut().query_filtered::<Entity, GameplayEntity>().iter(app.world()).count();
-        assert_eq!(n, 5, "the field-wipe filter catches the Detonator, Pulsar, Phantom, its decoys, and its wake");
+        assert_eq!(n, 5, "the field-wipe filter catches the Detonator, Pulsar, Phantom, its possessed vessel, and its wake");
     }
 
     #[test]
@@ -9184,18 +9608,52 @@ mod tests {
     }
 
     #[test]
-    fn finale_field_arrives_in_groups() {
-        // wave 30 with an empty field drops a whole mono-type GROUP of ten at once (not one rock at a time)
+    fn finale_field_trickles_in_not_all_at_once() {
+        // wave 30 streams its mono-type GROUP in a rock at a time — never a wall of ten drifting on together
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
         app.insert_resource(SpawnClock(0.0));
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
-        app.insert_resource(FinaleGroup::default());
+        app.insert_resource(FinaleGroup { idx: 0, remaining: FINALE_GROUP_SIZE }); // a fresh group queued, as boss_director sets it
+        app.add_systems(Update, top_up_asteroids);
+
+        // the first beat drops ONE rock, not the whole group
+        app.update();
+        let n1 = app.world_mut().query::<&Asteroid>().iter(app.world()).count();
+        assert_eq!(n1, 1, "the finale group trickles in — one rock on the first beat, not all ten (got {n1})");
+
+        // stepping the spawn clock keeps feeding the SAME group up to its full size
+        for _ in 0..FINALE_GROUP_SIZE {
+            app.world_mut().resource_mut::<SpawnClock>().0 = 0.0; // the trickle interval elapsed
+            app.update();
+        }
+        let n = app.world_mut().query::<&Asteroid>().iter(app.world()).count();
+        assert_eq!(n, FINALE_GROUP_SIZE, "the full group is ten rocks, delivered gradually (got {n})");
+        assert_eq!(app.world().resource::<FinaleGroup>().remaining, 0, "the group's spawn quota is spent");
+    }
+
+    #[test]
+    fn a_lingering_gold_does_not_stall_the_finale() {
+        // a gold 1UP rock is an Asteroid too; it must NOT count as "field not clear", or the next finale
+        // group never starts (regression: no asteroids spawned while a gold lingered)
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(Wave { level: 30, timer: WAVE_SECS, calm: 0.0 });
+        app.insert_resource(SpawnClock(0.0));
+        app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
+        app.insert_resource(FinaleGroup { idx: 0, remaining: 0 }); // the current group's been delivered
+        // ONLY a gold rock remains on the field (Asteroid + Gold)
+        app.world_mut().spawn((
+            Asteroid { size: 3, verts: vec![Vec2::X * 60.0], rot: 0.0, spin: 0.0, dense: false, hp: 1 },
+            Gold,
+            Velocity(Vec2::ZERO),
+            Transform::from_xyz(120.0, 0.0, 0.0),
+        ));
         app.add_systems(Update, top_up_asteroids);
         app.update();
-        let n = app.world_mut().query::<&Asteroid>().iter(app.world()).count();
-        assert_eq!(n, FINALE_GROUP_SIZE, "the finale field arrives as a full group of ten, not one rock at a time (got {n})");
+        assert_eq!(app.world().resource::<FinaleGroup>().remaining, FINALE_GROUP_SIZE, "the next group is queued despite the lingering gold");
+        assert_eq!(app.world().resource::<FinaleGroup>().idx, 1, "…and the colour cycle advanced");
     }
 
     #[test]

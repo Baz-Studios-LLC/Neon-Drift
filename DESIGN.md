@@ -61,7 +61,7 @@ in that boss's colour, rising in intensity as the wave nears (`boss_warning_upda
 | 15 | **The Slinger** | ✅ | *Shoot* — a large gunship that hovers high and TRACTOR-BEAMS a field rock, reels it to its muzzle, then fires it at you like a cannonball; exposed core, no shield. Its wave is green (dense) rocks, so grabbed rounds resist being shot away | Dodge the fast shots (you can't reliably spam-break a dense round); chip the core between barrages |
 | 20 | **The Detonator** | ✅ | *Prime* — primes nearby rocks into live bombs; **armored EXCEPT while priming** (its chartreuse core opens for the channel) | Punish the priming window — unload on the exposed core; dodge the bombs it plants |
 | 25 | **The Pulsar** | 🔷 | *Pulse* — invulnerable while lit; shockwaves fling every rock (and you) outward | Hit only on the dark beat; don't get pinned to a wall |
-| 30 | **The Phantom** ("The Haunt") | ✅ | *Untouchable* — an INTANGIBLE ghost (shots pass through) that must SURFACE to fire its quadrant-sweeping ray; p2 splits into identical decoys (only the real one attacks, and it shuffles), p3 drops the mask — solid, charging, searing a lethal spectral wake | Bait the ray, punish the surface window; watch the eyes to find the real one; sidestep the locked charge line and don't get walled in by the wake |
+| 30 | **The Phantom** ("The Haunt") | ✅ | *Untouchable* — an INTANGIBLE ghost (shots pass through) that must SURFACE to be hit; p1 sweeps a quadrant ray, p2 POSSESSES a homing rock (break the vessel to rip it out), p3 drops the mask — solid, charging, searing a lethal spectral wake | Bait the ray & punish the surface window; break the possessed vessel to expose it; sidestep the locked charge line and don't get walled in by the wake |
 | 35 | **The Hive** | 🔷 | *Split* — the boss **is** an asteroid; every hit mitoses, fragments re-fuse if ignored | Burn all pieces down before they merge |
 | 40 | **The Prism** | 🔷 | *Reflect* — facets bounce your shots; spawns crystal rocks that also reflect | Catch an open facet, or shoot it *through* a rock |
 | 45 | **Gemini** | 🔷 | *Link* — twin ships tethered by a shared rock core; damage transfers between them | Break the core rock to sever them, then focus one |
@@ -185,35 +185,56 @@ run is perfected**.
     punish the recovery.**
   - **Per-phase pool + RESET** (`PHANTOM_PHASE_HP = 30` refills each phase; `transition` reset beat between
     phases, `PHANTOM_RESET_SECS`; phase advances only via a completed reset). Clear phase 3 → win.
-  - **The Sweep Ray** (`PHANTOM_RAY_*`, Idle→Telegraph→Fire; every phase): telegraphs a random 90° quadrant
-    (~1.7s tell) then sweeps a lethal beam (swept-arc `angle_in_arc`, frame-rate-robust) that vaporizes rocks
-    + kills the ship; faster each phase (4.6 → 3.5 → 2.4s). It roams an unhurried Lissajous
-    (`PHANTOM_ROAM_EASE`), holding still while a beam is live or while surfaced.
+  - **The Sweep Ray** (`PHANTOM_RAY_*`, Idle→Telegraph→Fire; **PHASE 1's signature only** now — p2 possesses,
+    p3 charges): **AIMS at the player** — the 90° quadrant centres on the ship's bearing (+ jitter), so it
+    sweeps the corner you're nearest (~1.7s tell = the dodge window). The beam (swept-arc `angle_in_arc`,
+    frame-rate-robust) spans the **full arena diagonal** (`arena.half.length()*2 + 40`, so it reaches the far
+    edge from any position, not just centre) and vaporizes rocks + kills the ship. It roams an unhurried
+    Lissajous (`PHANTOM_ROAM_EASE`), holding still while a beam is live or while surfaced. Its spectral body
+    **dissolves any asteroid it drifts through** (`phantom_dissolve`, spares the p2 seek target) — never clips.
+    Every cue is its **own sound** (`SoundFx::Haunt`), not the warp.
   - **P1 — HAUNT:** the ghost + the ray. Learn the bait-and-punish rhythm.
-  - **P2 — SPLIT:** it fractures into `PHANTOM_DECOYS = 2` **identical apparitions** (`PhantomDecoy`,
-    `phantom_decoy_update` roams the same Lissajous seeded apart; drawn by the shared `draw_haunt_skull` —
-    pixel-identical, same idle ember). Decoys never attack and can't be hit; **only the real one fires** (its
-    eyes blaze on the telegraph), and when its surface window closes it **SWAPS positions with a random
-    decoy** (the shell game re-deals every punish). Decoys dispel at the phase break.
-  - **P3 — HUNT:** the mask drops — **solid full-time** (always hittable in `collisions`, body kills on
-    contact). It **locks the ship's bearing** (`PHANTOM_CHARGE_AIM` telegraph line, eyes blazing), then
-    **DASHES** (`PHANTOM_CHARGE_SPEED/SECS`, every `PHANTOM_CHARGE_EVERY`), **searing a wake of spectral
-    afterimages** (`SpectralTrail`, `spectral_trail_update`: lethal `PHANTOM_TRAIL_R` for `PHANTOM_TRAIL_TTL`)
-    — lingering walls in the no-wrap arena while the ray runs at its fastest. No surface freeze (it no longer
-    hides). The wake dies with it on the win.
+  - **P2 — POSSESSION:** it **SEEKS a real field rock**, glides to it (`PHANTOM_SEEK_SPEED`), and **dives IN**
+    — that rock is consumed and reborn as a haunted **vessel** (`Possessed`) it hides inside, unhittable;
+    **shots hit the vessel, not the ghost**. The vessel homes at the ship + kills on contact
+    (`possessed_update`), and gunfire chips its `PHANTOM_POSSESS_HP` (a hook in `collisions`). **Break it and
+    the Haunt is RIPPED OUT into the open** — it surfaces (`vuln`) for the punish window (the *same* damage
+    path as P1's ray-recovery). Then it hunts the next rock (state: `seeking` / `possessed` / `dive`) until
+    the pool's gone. No ray in P2. Its own new mechanic — a bookend that turns the belt back into the fight;
+    retired the old decoy shell-game.
+  - **P3 — HUNT:** the mask drops — **solid full-time** (always hittable, body kills on contact) and **NO
+    beam**: a pure charger. It **locks the ship's bearing** (`PHANTOM_CHARGE_AIM` telegraph line, eyes
+    blazing), then **DASHES** (`PHANTOM_CHARGE_SPEED/SECS`), **searing a wake of lethal spectral afterimages**
+    (`SpectralTrail`, lethal `PHANTOM_TRAIL_R` for `PHANTOM_TRAIL_TTL`) that wall the no-wrap arena; the wake
+    dies with it on the win. **Desperation:** the more of its final pool you strip, the less it waits between
+    lunges (`PHANTOM_CHARGE_EVERY × (0.4 + 0.6·hpFrac)` — base gap down to ~40% at death's door; the aim/dodge
+    window is FIXED, fairer-but-relentless), and it **stalks** — biasing its roam toward the ship (35%→75% as
+    it nears death) so it's always closing in.
   - **Look:** the spectral skull (shared `draw_haunt_skull`: domed cranium, angry brow, ember eyes that blaze
     when it attacks or locks on, nasal, clenched teeth) — **ghost-faint + edge-wavering** while intangible;
     when surfaced the **skull CRACKS OPEN — jagged fractures + a molten core burn through, sealing as `vuln`
     runs out** (read the boss's own form, not a UI ring — the old containment ring was cut for being too
-    gamey); solid all of P3; hue morphs per phase (spectral → chartreuse → hot rose); phase-break flash; **3
-    phase pips** by the bar.
-  - **The finale field arrives in SEQUENTIAL mono-type GROUPS of ten** (`FinaleGroup` + `top_up_asteroids`,
-    `FINALE_GROUP_SIZE`): 10 blue → (field clear) → 10 green → orange → pulser → red → … `boss_director`
-    clears the field + resets the cycle on the Phantom's arrival. (Fixed an over-crowded finale field.)
+    gamey); solid all of P3; hue morphs per phase (spectral → chartreuse → hot rose); phase-break flash. (The
+    phase pips were removed — they clipped the boss-name HUD text.)
+  - **The finale field arrives in SEQUENTIAL mono-type GROUPS of ten** (`FinaleGroup{idx,remaining}` +
+    `top_up_asteroids`, `FINALE_GROUP_SIZE`): 10 blue → (field clear) → 10 green → orange → pulser → red → …
+    `boss_director` clears the field + resets the cycle on the Phantom's arrival. Each group **trickles in a
+    rock at a time** (`FINALE_TRICKLE`), never a wall of ten drifting on together; a colour starts only once
+    the field's clear (`FINALE_GROUP_GAP`). Reds absorb the nearest rock **including other reds**, so the
+    all-red group **consolidates** into fewer, bigger threats instead of drifting inert.
   - **It's the player's fight:** the ally Drone is deliberately **excluded from targeting the Phantom**
     (`drone_update`'s boss query drops `With<Phantom>`) — no auto-fire at the ghost, no tracer giving away
-    the real decoy. Beating it awards `BOSS_SCORE` (parity with the other bosses) and latches Victory
-    hard (zeroes `run.respawn` so a same-frame last-life death can't stomp the win with GameOver).
+    the ghost. Beating it awards `BOSS_SCORE`, then runs a **cinematic DEATH SCENE** — **event-driven, not a
+    fixed timer** (`PHANTOM_VICTORY_SECS` is only a safety cap), in two beats (`Phantom.erupted`): (1) GATHER —
+    the boss glides back to the **MIDDLE**; (2) ERUPT — it **pops every asteroid** and a **layered burst of
+    light** (speeds 420→1400) **FILLS the screen** in all directions from `Vec2::ZERO`, and the **true-form
+    core** tears free and **flees EAST** as the `EscapeShard` (ease-in `MIN→MAX` speed) — small + subtle, lost
+    among the light (the sequel seed). Once the shard has **left the arena**, the hero's ship
+    **warps off east after it** — a cosmetic `DepartingShip` (`departing_ship_update`, `SHIP_DEPART_SPEED`);
+    the real `Ship` is despawned so control/bounds don't fight it. **Only once BOTH have cleared → Victory.**
+    Latched HARD: zeroes `run.respawn`, holds the arena **calm** (`wave.calm` — the calm-countdown HUD is
+    suppressed on wave 30, so no stray "NEXT WAVE IN"), AND **shields the ship** (`invuln`) so a last-life
+    stray hit can't stomp the win into a GameOver.
   - **Dev F4 (`dev_face_phantom`, debug only)** — wipes the field (keeps the ship) + jumps to wave 30 (resets
     the group cycle) so the finale can be tested without clearing 29 waves. Dev F2 sets phase 3 + zero → the
     win path in one press. (Dev keys are gated to the Playing state.)
