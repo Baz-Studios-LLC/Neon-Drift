@@ -3,7 +3,9 @@
 Patch notes for the Rust + Bevy build. Newest first. (Releases are cut to GitHub and picked up by the
 Baz Studios launcher.) **Keep this current with every change** — it's the record testers read.
 
-## Unreleased
+## v0.3.0 — The Haunt: Act III, the six-boss run & the finale (2026-07-23)
+
+The standard run is now complete end-to-end — **thirty waves, six bosses, and a final boss.**
 
 - **The wave-30 finale is THE PHANTOM — reborn as THE HAUNT** (the channel-the-old-bosses design is out): a
   spectral predator **too arrogant to be touched**, with its own mechanics per phase. The fight is you
@@ -21,10 +23,14 @@ Baz Studios launcher.) **Keep this current with every change** — it's the reco
     contact) and **charges across the arena** on a telegraphed lock-on line, **searing a wake of spectral
     afterimages** that linger and kill on touch — the arena shrinks around you while the ray fires at its
     fastest.
-  - **The look:** the spectral skull (angry brow, ember eyes that blaze as it attacks) — **ghostly-faint and
-    wavering** while intangible; when it surfaces, **the skull CRACKS OPEN and a molten core burns through**,
-    the fractures sealing as your window closes (read the boss, not a UI ring); a flash on each phase break;
-    **three phase pips** by its health bar.
+  - **The look:** a menacing **spectral mask-visage** — an elongated angular skull in two halves, a heavy
+    glaring brow, downward **eye-slashes** with red embers, **jagged fangs**, wreathed in a slow **broken
+    halo/crown**. **Ghostly-faint and wavering** while intangible; when it surfaces, the **mask SPLITS OPEN
+    around a searing white-hot core** (sealing as your window closes — you read the boss's own form, not a UI
+    ring); a flash on each phase break; **three phase pips** by its health bar.
+  - **A real send-off:** the finale kill no longer cuts in abruptly — a short **death-throes beat** plays (the
+    arena goes calm, the core comes apart) and a **small spectral shard tears free and streaks off-screen**
+    before the Victory screen.
   - **The finale field arrives in mono-type GROUPS of ten** — ten blue drift in; once the field is clear,
     ten green, then orange, then pulser, then red, and around again. Far less crowded, one colour at a time.
 - **Finale fixes + code-health pass** (from an adversarial review):

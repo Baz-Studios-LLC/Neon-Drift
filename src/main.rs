@@ -241,6 +241,9 @@ const PHANTOM_CHARGE_SPEED: f32 = 900.0; // dash speed — fast, but locked stra
 const PHANTOM_CHARGE_SECS: f32 = 0.6;    // dash duration
 const PHANTOM_TRAIL_TTL: f32 = 2.2;      // how long each spectral afterimage in its wake stays lethal
 const PHANTOM_TRAIL_R: f32 = 16.0;       // kill radius of one afterimage
+// ── the win: a death-throes beat + a spectral shard streaking off-screen (a seed for whatever comes next) ──
+const PHANTOM_VICTORY_SECS: f32 = 2.6;   // the beat between the finale kill and the Victory screen (no abrupt cut)
+const PHANTOM_SHARD_SPEED: f32 = 340.0;  // how fast the escaping shard streaks off-screen
 
 // Boss 2 — the devourer (wave 10): a red seeker that eats rocks to grow + heal.
 const DEVOURER_HP: i32 = 34; // core HP; it STARTS full and HEALS toward it, so it plays tankier than this raw number (ramp: > Warden). Reduced from 70 to fit the ascending ladder
@@ -484,39 +487,55 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
     )
 }
 
-// The Haunt's skull — a domed cranium tapering to a jaw, angry brow, glaring eye-sockets (embers at
-// `ember` brightness), nasal cavity, clenched teeth. Shared by the real Phantom and its phase-2 decoys so
-// the apparitions are pixel-identical (`wispy` wavers the ghost-form edges; a surfaced skull is rigid).
-fn draw_haunt_skull(gizmos: &mut Gizmos, c: Vec2, hr: f32, body: Color, ember: f32, pulse: f32, wispy: bool) {
-    let head: Vec<Vec2> = (0..=30)
-        .map(|k| {
-            let ang = k as f32 / 30.0 * TAU;
-            let s = ang.sin();
-            let jaw = 1.0 - 0.34 * (-s).max(0.0); // narrow the lower half into a jaw
-            let yr = if s >= 0.0 { 1.04 } else { 0.9 }; // tall dome up top, shorter jaw below
-            let wisp = if wispy { (ang * 3.0 + pulse * 1.4).sin() * 0.05 } else { 0.0 }; // edges waver while ghostly
-            c + Vec2::new(ang.cos() * hr * (0.9 + wisp) * jaw, s * hr * (yr + wisp))
-        })
-        .collect();
-    gizmos.linestrip_2d(head, body);
-    gizmos.line_2d(c + Vec2::new(-hr * 0.56, hr * 0.42), c + Vec2::new(-hr * 0.12, hr * 0.26), body); // angry brow (L)
-    gizmos.line_2d(c + Vec2::new(hr * 0.56, hr * 0.42), c + Vec2::new(hr * 0.12, hr * 0.26), body); // angry brow (R)
-    for sx in [-1.0f32, 1.0] {
-        let eye = c + Vec2::new(sx * hr * 0.34, hr * 0.1);
-        gizmos.circle_2d(Isometry2d::from_translation(eye), hr * 0.2, Color::srgb(0.02, 0.05, 0.04)); // hollow socket
-        gizmos.circle_2d(Isometry2d::from_translation(eye), hr * 0.1, dim(phantom_ray_color(), ember)); // ember
+// The Haunt's visage — a menacing spectral skull-mask: an elongated angular cranium in two halves, a heavy
+// glaring brow, downward eye-slashes with red embers, and a jagged fanged maw, wreathed in a slow broken
+// halo (its crown). When `open` > 0 (surfaced) the mask SPLITS — the halves part and a searing core blazes
+// in the widening seam, sealing as the window closes. `wispy` shivers the whole form (the intangible ghost).
+// `ember` is the eye brightness. Shared by the real Phantom and its phase-2 decoys (pixel-identical).
+#[allow(clippy::too_many_arguments)]
+fn draw_haunt_skull(gizmos: &mut Gizmos, c: Vec2, hr: f32, body: Color, ember: f32, pulse: f32, wispy: bool, open: f32) {
+    let wv = if wispy { (pulse * 1.6).sin() * 0.05 } else { 0.0 }; // spectral shiver at the extremities
+    // ── broken HALO / crown: shard-ticks orbiting, slowly counter-rotating ──
+    let halo = dim(body, 0.4);
+    for k in 0..8 {
+        let a = k as f32 / 8.0 * TAU - pulse * 0.35;
+        let r1 = hr * (1.42 + 0.08 * (pulse * 2.2 + k as f32 * 1.7).sin());
+        gizmos.line_2d(c + Vec2::from_angle(a) * hr * 1.24, c + Vec2::from_angle(a) * r1, halo);
     }
-    gizmos.linestrip_2d(
-        [c + Vec2::new(-hr * 0.1, -hr * 0.06), c + Vec2::new(hr * 0.1, -hr * 0.06), c + Vec2::new(0.0, -hr * 0.34), c + Vec2::new(-hr * 0.1, -hr * 0.06)],
-        body,
-    ); // nasal cavity — an inverted triangle
-    // mouth: a row of clenched teeth between two gum lines
-    let (mx, my) = (hr * 0.34, -hr * 0.5);
-    gizmos.line_2d(c + Vec2::new(-mx, my + hr * 0.12), c + Vec2::new(mx, my + hr * 0.12), body); // upper gum
-    gizmos.line_2d(c + Vec2::new(-mx, my - hr * 0.02), c + Vec2::new(mx, my - hr * 0.02), body); // lower gum
-    for k in 0..7 {
-        let tx = c.x - mx + (k as f32 / 6.0) * (2.0 * mx);
-        gizmos.line_2d(Vec2::new(tx, c.y + my + hr * 0.12), Vec2::new(tx, c.y + my - hr * 0.02), dim(body, 0.8)); // teeth
+    let split = open * hr * 0.42; // how far the two halves have parted
+    // ── searing CORE in the seam (blazes brighter as it opens) ──
+    if open > 0.02 {
+        let core = mix(body, Color::srgb(9.0, 7.5, 8.5), 0.72); // white-hot heart
+        let (ch, cw) = (hr * 0.92, hr * 0.05 + split * 0.85);
+        gizmos.linestrip_2d(
+            [c + Vec2::new(0.0, ch), c + Vec2::new(cw, ch * 0.18), c + Vec2::new(0.0, -ch), c + Vec2::new(-cw, ch * 0.18), c + Vec2::new(0.0, ch)],
+            dim(core, 0.55 + 0.45 * open),
+        );
+        gizmos.circle_2d(Isometry2d::from_translation(c), cw * 1.4 + hr * 0.06, dim(core, 0.5 + 0.5 * open));
+    }
+    // ── the two face-halves (mirrored), parting by `split` ──
+    for side in [-1.0f32, 1.0] {
+        let off = Vec2::new(side * split, 0.0);
+        let m = |x: f32, y: f32| c + off + Vec2::new(side * x * hr, y * hr); // half-space → world (x mirrored)
+        // elongated angular contour: crown → temple → cheekbone → lower cheek → jaw → chin
+        gizmos.linestrip_2d(
+            [m(0.10, 1.05 + wv), m(0.64, 0.82), m(0.95, 0.24), m(0.80, -0.34), m(0.46, -0.82), m(0.11, -1.05 - wv)],
+            body,
+        );
+        gizmos.line_2d(m(0.70, 0.48), m(0.16, 0.22), body); // heavy angry brow ridge (slants down to the seam)
+        // angular EYE-SLASH socket (downward glare) + red ember
+        let ec = m(0.42, 0.05);
+        gizmos.linestrip_2d(
+            [ec + Vec2::new(-side * hr * 0.13, hr * 0.11), ec + Vec2::new(side * hr * 0.15, hr * 0.03), ec + Vec2::new(side * hr * 0.15, -hr * 0.07), ec + Vec2::new(-side * hr * 0.13, -hr * 0.12), ec + Vec2::new(-side * hr * 0.13, hr * 0.11)],
+            body,
+        );
+        gizmos.circle_2d(Isometry2d::from_translation(ec + Vec2::new(side * hr * 0.02, -hr * 0.01)), hr * 0.065, dim(phantom_ray_color(), ember));
+        // jagged FANGS on this half of the maw (irregular lengths)
+        let fang = [0.42f32, 0.95, 0.6, 1.0];
+        for (t, &f) in fang.iter().enumerate() {
+            let tx = 0.07 + t as f32 * 0.12;
+            gizmos.line_2d(m(tx, -0.46), m(tx, -0.46 - 0.16 * f), dim(body, 0.9));
+        }
     }
 }
 
@@ -698,7 +717,7 @@ type GameplayEntity = Or<(
     With<Slinger>,
     // (Cannonball entities are also Asteroids, so With<Asteroid> already covers them.)
     // Nested Or keeps this within Bevy's 15-element tuple-filter limit.
-    Or<(With<ChainShot>, With<Pickup>, With<Drone>, With<Well>, With<Detonator>, With<Pulsar>, With<Phantom>, With<PhantomDecoy>, With<SpectralTrail>)>,
+    Or<(With<ChainShot>, With<Pickup>, With<Drone>, With<Well>, With<Detonator>, With<Pulsar>, With<Phantom>, With<PhantomDecoy>, With<SpectralTrail>, With<EscapeShard>)>,
 )>;
 
 #[derive(Component)]
@@ -876,6 +895,7 @@ struct Phantom {
     phase: u8,        // 1..=3 — advanced only by a completed reset, never mid-phase
     transition: f32,  // > 0 → the invulnerable RESET beat between phases (reposition + reform, no attacks)
     flash: f32,       // > 0 → a phase-start flash is fading (the spectacle: the mind fracturing further)
+    victory: f32,     // > 0 → the finale is beaten: a death-throes beat runs before the Victory screen
     vuln: f32,        // > 0 → SURFACED: solid, still, and hittable (set after each ray; the p1/p2 damage window)
     // ── Sweep Ray state (its own signature mechanic) ──
     ray: RayPhase,
@@ -904,6 +924,14 @@ struct SpectralTrail {
     ttl: f32,
 }
 
+// A shard of the beaten Phantom, streaking off-screen after the finale kill — a seed for what comes next.
+// Purely cosmetic (no collision); moved by its Velocity and culled at the edge in `escape_shard_update`.
+#[derive(Component)]
+struct EscapeShard {
+    spin: f32,
+    verts: Vec<Vec2>, // its jagged little silhouette (spun as it flies)
+}
+
 impl Phantom {
     // Fresh finale core, phase 1 with a full phase pool. Ray starts Idle with the first-sweep grace.
     fn new(hp: i32, entered: bool, charge: f32) -> Self {
@@ -915,6 +943,7 @@ impl Phantom {
             phase: 1,
             transition: 0.0,
             flash: 0.0,
+            victory: 0.0,
             vuln: 0.0,
             ray: RayPhase::Idle,
             ray_cool: PHANTOM_RAY_FIRST,
@@ -2862,8 +2891,8 @@ fn collisions(
         // (`vuln > 0`, the recovery right after its ray) or in PHASE 3 (the mask is off: solid full-time).
         for (spos, mut sg) in &mut phantoms {
             let ghost = sg.vuln <= 0.0 && sg.phase < 3;
-            if ghost || sg.charge > 0.0 || sg.transition > 0.0 {
-                continue; // intangible — the round sails through the apparition
+            if ghost || sg.charge > 0.0 || sg.transition > 0.0 || sg.victory > 0.0 {
+                continue; // intangible — the round sails through the apparition (or it's already beaten, mid-throes)
             }
             let rr = PHANTOM_R + br;
             if bp.distance_squared(spos.translation.truncate()) < rr * rr {
@@ -5296,6 +5325,32 @@ fn phantom_update(
             continue; // no attacks / contact / damage during the reset
         }
 
+        // ── VICTORY THROES: it's beaten — the arena is held calm and the core comes apart over a beat while
+        //    the shard escapes, THEN the Victory screen (so the win doesn't cut in abruptly on the kill) ──
+        if sg.victory > 0.0 {
+            sg.victory -= dt;
+            for (re, _t) in &rocks {
+                commands.entity(re).despawn(); // keep the arena calm for the send-off
+            }
+            for (de, _dtf) in &decoys {
+                commands.entity(de).despawn();
+            }
+            for te in &trails {
+                commands.entity(te).try_despawn();
+            }
+            for _ in 0..4 {
+                let off = Vec2::from_angle(rng.gen_range(0.0..TAU)) * rng.gen_range(0.0..PHANTOM_R);
+                burst(&mut commands, p + off, phantom_color(), 3, 240.0, &mut rng); // it crackles apart
+            }
+            if sg.victory <= 0.0 {
+                burst(&mut commands, p, phantom_color(), 90, 620.0, &mut rng);
+                burst(&mut commands, p, Color::srgb(6.0, 6.0, 7.0), 44, 440.0, &mut rng);
+                commands.entity(sge).despawn();
+                next.set(GameState::Victory);
+            }
+            continue;
+        }
+
         // ── PHASE CLEARED (this phase's pool is gone) → RESET into the next phase, or WIN on the last ──
         if sg.hp <= 0 {
             // the apparitions dispel with the phase that made them (and everything on the win)
@@ -5304,17 +5359,22 @@ fn phantom_update(
                 commands.entity(de).despawn();
             }
             if sg.phase >= 3 {
-                // FINALE KILL → VICTORY. Latch it for real: zero run.respawn so `respawn` (chained AFTER this)
-                // can't cross its last-life timer and stomp Victory with GameOver on this same frame.
+                // FINALE KILL → begin the death-throes BEAT (the Victory screen comes after — no abrupt cut).
+                // Latch the win now: zero run.respawn so `respawn` (chained after this) can't stomp it with a
+                // same-frame GameOver, and bank the score. The boss is NOT despawned yet — it comes apart below.
                 run.respawn = 0.0;
                 score.0 += BOSS_SCORE; // the hardest kill in the game — worth as much as any other boss
-                for te in &trails {
-                    commands.entity(te).try_despawn(); // its wake dies with it (try_ — the ttl system may beat us to a trail)
-                }
-                burst(&mut commands, p, phantom_color(), 80, 560.0, &mut rng);
-                burst(&mut commands, p, Color::srgb(6.0, 6.0, 7.0), 40, 400.0, &mut rng);
-                commands.entity(sge).despawn();
-                next.set(GameState::Victory);
+                sg.victory = PHANTOM_VICTORY_SECS;
+                // a spectral SHARD tears free and streaks off-screen — a seed for what comes next
+                let dir = Vec2::from_angle(rng.gen_range(0.0..TAU));
+                let verts: Vec<Vec2> = (0..6).map(|k| Vec2::from_angle(k as f32 / 6.0 * TAU) * (7.0 + rng.gen_range(-2.5..2.5))).collect();
+                commands.spawn((
+                    EscapeShard { spin: rng.gen_range(-7.0..7.0), verts },
+                    Velocity(dir * PHANTOM_SHARD_SPEED),
+                    Transform::from_xyz(p.x, p.y, 0.0),
+                ));
+                burst(&mut commands, p, phantom_color(), 60, 500.0, &mut rng);
+                sfx.write(SoundFx::Warp);
             } else {
                 sg.transition = PHANTOM_RESET_SECS; // fracture → reset → next phase
                 sg.flash = 0.8;
@@ -5516,6 +5576,22 @@ fn spectral_trail_update(
                     kill_ship(&mut commands, &mut run, &mut next, &mut sfx, se, spos, &mut rng);
                 }
             }
+        }
+    }
+}
+
+// The victory shard streaks off-screen (spins as it flies) after the finale kill, then is culled — the
+// spectral seed for whatever comes next. Purely cosmetic; no collision.
+fn escape_shard_update(time: Res<Time>, mut commands: Commands, arena: Res<Arena>, mut shards: Query<(Entity, &mut Transform, &mut EscapeShard, &Velocity)>) {
+    let dt = time.delta_secs();
+    let h = arena.half;
+    for (e, mut tf, mut sh, v) in &mut shards {
+        tf.translation.x += v.0.x * dt;
+        tf.translation.y += v.0.y * dt;
+        sh.spin += dt * 4.5;
+        let p = tf.translation.truncate();
+        if p.x.abs() > h.x + 60.0 || p.y.abs() > h.y + 60.0 {
+            commands.entity(e).despawn(); // gone — off into the dark
         }
     }
 }
@@ -5766,12 +5842,13 @@ fn render_boss(
     detonators: Query<(&Detonator, &Transform)>,
     pulsars: Query<(&Pulsar, &Transform)>,
     phantoms: Query<(&Phantom, &Transform)>,
-    decoys: Query<(&PhantomDecoy, &Transform)>,
-    trails: Query<(&SpectralTrail, &Transform)>,
+    // the Haunt's extra visuals bundled into one param (three separate queries would exceed Bevy's 16-param limit)
+    haunt: (Query<(&PhantomDecoy, &Transform)>, Query<(&SpectralTrail, &Transform)>, Query<(&EscapeShard, &Transform)>),
     prime_targets: Query<&Transform, With<Asteroid>>,
     cannonballs: Query<(&Cannonball, &Transform)>,
     players: Query<&Transform, (With<Ship>, Without<Slinger>)>,
 ) {
+    let (decoys, trails, shards) = haunt;
     let h = arena.half;
     let t = time.elapsed_secs();
     let mc = boss_color();
@@ -5853,7 +5930,8 @@ fn render_boss(
     //    it dims + reforms during a reset, flashes on each phase break, and fires its Sweep Ray. ──
     for (sg, stf) in &phantoms {
         let c = stf.translation.truncate();
-        let hr = PHANTOM_R;
+        // beaten → the mask shrinks as it comes apart over the death-throes beat
+        let hr = PHANTOM_R * if sg.victory > 0.0 { (sg.victory / PHANTOM_VICTORY_SECS).clamp(0.06, 1.0) } else { 1.0 };
         // per-phase morph: spectral base → chartreuse (p2) → hot rose (p3)
         let sc = match sg.phase {
             1 => phantom_color(),
@@ -5873,8 +5951,6 @@ fn render_boss(
         } else {
             dim(sc, 0.5 + 0.12 * (sg.pulse * 1.7).sin()) // ghostly, shimmering faint
         };
-
-        // the skull itself (shared with the phase-2 decoys so they're pixel-identical)
         let ember = if surfaced || sg.aim > 0.0 || sg.charging > 0.0 {
             1.0 // blazing — exposed, or locked on for a charge
         } else {
@@ -5885,24 +5961,9 @@ fn render_boss(
             }
         };
         let solid = surfaced || sg.phase >= 3; // phase 3 is solid full-time — no ghost waver
-        draw_haunt_skull(&mut gizmos, c, hr, body, ember, sg.pulse, !solid);
-        // SURFACED: the skull CRACKS OPEN — jagged fractures split the bone and a molten core burns through.
-        // The cracks seal + the core dims as the window closes: you read the boss's own form, not a UI ring.
-        if surfaced {
-            let w = (sg.vuln / PHANTOM_MATERIALIZE).clamp(0.0, 1.0); // 1 = just cracked, 0 = sealing shut
-            let core = Color::srgb(9.0, 2.6, 1.4); // searing molten heart — hot, screams "strike here"
-            for k in 0..5 {
-                // fractures radiate from the core, each a two-segment jag, receding as it seals
-                let a = k as f32 / 5.0 * TAU + k as f32 * 1.3;
-                let jitter = (sg.pulse * 6.0 + k as f32 * 2.0).sin() * 0.18;
-                let d0 = Vec2::from_angle(a) * hr * 0.28;
-                let d1 = Vec2::from_angle(a + jitter) * hr * (0.5 + 0.55 * w);
-                gizmos.line_2d(c + d0, c + d1, dim(core, 0.35 + 0.65 * w));
-                gizmos.line_2d(c, c + d0, dim(core, 0.5 + 0.5 * w));
-            }
-            let flare = 1.0 + 0.2 * (sg.pulse * 8.0).sin();
-            gizmos.circle_2d(Isometry2d::from_translation(c), hr * 0.24 * (0.55 + 0.45 * w) * flare, dim(core, 0.55 + 0.45 * w)); // the exposed core
-        }
+        // `open`: the mask SPLITS around its searing core through the surface window, sealing as it closes
+        let open = if surfaced { (sg.vuln / PHANTOM_MATERIALIZE).clamp(0.0, 1.0) } else { 0.0 };
+        draw_haunt_skull(&mut gizmos, c, hr, body, ember, sg.pulse, !solid, open);
         // phase-3 AIM telegraph: the locked charge line flashes ahead of the dash — sidestep it
         if sg.aim > 0.0 {
             let frac = 1.0 - (sg.aim / PHANTOM_CHARGE_AIM).clamp(0.0, 1.0);
@@ -5954,7 +6015,7 @@ fn render_boss(
         let c = dtf.translation.truncate();
         let sc = mix(phantom_color(), detonator_color(), 0.4); // decoys exist only in phase 2 — its hue
         let body = dim(sc, 0.5 + 0.12 * (d.pulse * 1.7).sin());
-        draw_haunt_skull(&mut gizmos, c, PHANTOM_R, body, 0.25, d.pulse, true);
+        draw_haunt_skull(&mut gizmos, c, PHANTOM_R, body, 0.25, d.pulse, true, 0.0);
     }
 
     // ── phase-3 spectral wake: each afterimage burns bright then gutters out as its ttl fades ──
@@ -5962,6 +6023,17 @@ fn render_boss(
         let f = (tr.ttl / PHANTOM_TRAIL_TTL).clamp(0.0, 1.0);
         let c = tt.translation.truncate();
         gizmos.circle_2d(Isometry2d::from_translation(c), PHANTOM_TRAIL_R * (0.5 + 0.5 * f), dim(phantom_ray_color(), 0.15 + 0.55 * f));
+    }
+
+    // ── the victory shard: a small jagged chunk of the beaten Phantom, spinning as it streaks off-screen ──
+    for (sh, stf) in &shards {
+        let c = stf.translation.truncate();
+        let pts: Vec<Vec2> = sh.verts.iter().map(|v| c + Vec2::from_angle(sh.spin).rotate(*v)).collect();
+        let mut loop_pts = pts.clone();
+        if let Some(&first) = loop_pts.first() {
+            loop_pts.push(first);
+        }
+        gizmos.linestrip_2d(loop_pts, phantom_color());
     }
 
     // cameo: the boss THAT'S ACTUALLY COMING drifts by in the background during the run-up — its own
@@ -7602,7 +7674,7 @@ fn main() {
                 .chain()
                 .run_if(in_state(GameState::Playing)),
         )
-        .add_systems(Update, (phantom_decoy_update, spectral_trail_update).run_if(in_state(GameState::Playing))) // the Haunt's p2 apparitions + p3 wake (no ordering needs — kept off the main chain)
+        .add_systems(Update, (phantom_decoy_update, spectral_trail_update, escape_shard_update).run_if(in_state(GameState::Playing))) // the Haunt's p2 apparitions + p3 wake + victory shard (no ordering needs — kept off the main chain)
         .add_systems(Update, (music_director, play_sfx))
         .add_systems(Update, menu_start.run_if(in_state(GameState::Menu)))
         .add_systems(
@@ -8790,17 +8862,26 @@ mod tests {
         app.insert_resource(Dev::default());
         app.insert_resource(Arena { half: Vec2::new(640.0, 400.0) });
         app.insert_resource(NextState::<GameState>::default());
-        // the FINAL phase's core just dropped → the win latches immediately (no drawn-out death a stray rock could preempt)
+        // the FINAL phase's core just dropped → a death-throes BEAT runs first (not an instant screen)
         let mut ph = Phantom::new(0, true, 0.0);
         ph.phase = 3; // clearing the last phase wins; earlier phases only reset
-        app.world_mut().spawn((ph, Transform::from_xyz(0.0, 0.0, 0.0)));
+        let boss = app.world_mut().spawn((ph, Transform::from_xyz(0.0, 0.0, 0.0))).id();
         app.insert_resource(Score(0));
         app.add_systems(Update, phantom_update);
         app.update();
+        let p = app.world().entity(boss).get::<Phantom>().unwrap();
+        assert!(p.victory > 0.0, "the finale kill starts the death-throes beat");
+        assert!(!matches!(app.world().resource::<NextState<GameState>>(), NextState::Pending(GameState::Victory)), "the Victory screen doesn't pop on the kill frame");
+        assert_eq!(app.world().resource::<Score>().0, BOSS_SCORE, "the kill banks the finale score");
+        assert_eq!(app.world_mut().query::<&EscapeShard>().iter(app.world()).count(), 1, "a spectral shard tears free and streaks off");
+        // run the beat down to its end → NOW the Victory screen, and the boss is gone
+        app.world_mut().entity_mut(boss).get_mut::<Phantom>().unwrap().victory = 0.0001;
+        app.update();
         assert!(
             matches!(app.world().resource::<NextState<GameState>>(), NextState::Pending(GameState::Victory)),
-            "clearing the final phase transitions to the Victory screen"
+            "once the beat elapses, the run transitions to the Victory screen"
         );
+        assert_eq!(app.world_mut().query::<&Phantom>().iter(app.world()).count(), 0, "and the boss is despawned");
     }
 
     #[test]
