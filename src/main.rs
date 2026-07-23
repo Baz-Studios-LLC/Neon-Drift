@@ -252,7 +252,7 @@ const PHANTOM_TRAIL_TTL: f32 = 2.2;      // how long each spectral afterimage in
 const PHANTOM_TRAIL_R: f32 = 16.0;       // kill radius of one afterimage
 // ── the win: a death-throes beat + a spectral shard streaking off-screen (a seed for whatever comes next) ──
 const PHANTOM_VICTORY_SECS: f32 = 9.0;      // death-scene SAFETY cap — normally it ends when the shard + ship have flown off (event-driven)
-const PHANTOM_BOOM_EVERY: f32 = 0.14;       // death scene: gap between explosions in the constant stream that runs until the core's off-screen
+const PHANTOM_BOOM_EVERY: f32 = 0.5;        // death scene: gap between explosions in the stream — kept ≥0.5s (≤2 flashes/sec) so the pulsing never strobes (photosensitivity)
 const PHANTOM_SHARD_MIN_SPEED: f32 = 60.0;  // the escaping core tears loose slowly…
 const PHANTOM_SHARD_MAX_SPEED: f32 = 270.0; // …then accelerates east off-screen (ease-in over PHANTOM_SHARD_RAMP)
 const PHANTOM_SHARD_RAMP: f32 = 2.1;        // seconds for the fleeing core to reach full speed (slower → the send-off lingers)
@@ -5470,7 +5470,7 @@ fn phantom_update(
                 sg.dive -= dt;
                 if sg.dive <= 0.0 {
                     sg.dive = PHANTOM_BOOM_EVERY;
-                    light_burst_to_edge(&mut commands, Vec2::ZERO, h, 34, Color::srgb(7.0, 7.6, 8.2), &mut rng); // reaches the edge
+                    light_burst_to_edge(&mut commands, Vec2::ZERO, h, 24, Color::srgb(7.0, 7.6, 8.2), &mut rng); // reaches the edge; softer per-pulse so the slow rhythm doesn't strobe
                 }
             }
             let mut launched_ship = false;
