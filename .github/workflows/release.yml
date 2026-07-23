@@ -106,10 +106,21 @@ jobs:
           # preserving the bundle's exec bits + structure a zip would mangle, then `open`s the .app).
           tar -czf "violet-edge-macos-aarch64.app.tar.gz" "$app"
 
+      # Release notes = the top (latest) section of CHANGELOG.md — the game changelog, no download boilerplate.
+      # The launcher pulls this body live for its "What's New", so keeping it changelog-only keeps that clean.
+      - name: Build release notes from CHANGELOG
+        shell: bash
+        run: |
+          # everything from the first "## " heading up to (not incl.) the next "## ", minus the heading line
+          awk '/^## /{n++} n==1' CHANGELOG.md | sed '1d' > RELEASE_NOTES.md
+          [ -s RELEASE_NOTES.md ] || echo "See CHANGELOG.md for details." > RELEASE_NOTES.md
+          echo "----- release notes -----"; cat RELEASE_NOTES.md
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
+          body_path: RELEASE_NOTES.md
           files: |
             violet-edge-*.zip
             violet-edge-*.dmg
