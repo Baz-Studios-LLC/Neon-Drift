@@ -37,6 +37,7 @@ const MAX_SPEED: f32 = 560.0; // px/s (a cap; sustained thrust settles a bit und
 const FIRE_COOLDOWN: f32 = 0.18; // s
 
 const BULLET_SPEED: f32 = 720.0; // px/s
+const AIM_ASSIST_ANGLE: f32 = 0.11; // rad (~6°): a shot snaps onto a target ONLY if your aim is already this close — a slight assist for small targets; you still have to be nearly on it
 const BULLET_LIFE: f32 = 1.6; // s — MINIMUM range floor (small windows); real range scales with the arena
 const BULLET_RANGE_FRAC: f32 = 1.5; // bullet travels this × the arena half-width, so reach scales with the screen (fixes "too short on a big display")
 const BULLET_R: f32 = 3.0;
@@ -2347,6 +2348,28 @@ fn ship_control(
     }
 }
 
+// Slight aim assist: given the raw aim (a unit vector), the ship position, candidate target positions, and
+// the bullet's reach, return the direction to fire. If a target sits inside a tight cone around the aim
+// (≤ AIM_ASSIST_ANGLE) and within range, snap onto the MOST-aligned one; otherwise fire straight. Small,
+// forgiving on small targets, but you have to be nearly on it already. Pure (no ECS) so it's unit-tested.
+fn assisted_aim(aim: Vec2, ship_pos: Vec2, targets: impl Iterator<Item = Vec2>, range: f32) -> Vec2 {
+    let mut dir = aim;
+    let mut best_cos = AIM_ASSIST_ANGLE.cos(); // a target must beat this alignment (be inside the cone) to win
+    for tp in targets {
+        let to = tp - ship_pos;
+        let d = to.length();
+        if d < SHIP_R || d > range {
+            continue;
+        }
+        let cos = aim.dot(to) / d; // aim is unit → cos of the angle between the aim and this target
+        if cos > best_cos {
+            best_cos = cos;
+            dir = to / d;
+        }
+    }
+    dir
+}
+
 fn fire(
     mut commands: Commands,
     time: Res<Time>,
@@ -2358,6 +2381,7 @@ fn fire(
     arena: Res<Arena>,
     mut sfx: EventWriter<SoundFx>,
     mut q: Query<(&mut Ship, &Transform)>,
+    targets: Query<&Transform, (Or<(With<Asteroid>, With<Enemy>, With<Possessed>)>, Without<Ship>)>, // aim-assist candidates
 ) {
     let dt = time.delta_secs();
     // bullet lifetime scales with the arena so its reach is a consistent fraction of the screen,
@@ -2388,8 +2412,11 @@ fn fire(
         }
         if want_fire && armed.0 && ship.cooldown <= 0.0 {
             ship.cooldown = if is_warhead { WARHEAD_COOLDOWN } else if is_mass { MASS_COOLDOWN } else { FIRE_COOLDOWN };
-            let dir = Vec2::from_angle(ship.angle);
-            let pos = t.translation.truncate() + dir * SHIP_R;
+            let aim = Vec2::from_angle(ship.angle);
+            let ship_pos = t.translation.truncate();
+            // AIM ASSIST: a slight snap onto the target the aim is most aligned with (see `assisted_aim`)
+            let dir = assisted_aim(aim, ship_pos, targets.iter().map(|tt| tt.translation.truncate()), BULLET_SPEED * bullet_life);
+            let pos = ship_pos + dir * SHIP_R;
             let mut b = commands.spawn((
                 Bullet { life: bullet_life, trail: Vec::new(), mass: is_mass },
                 Velocity(dir * BULLET_SPEED),
@@ -9147,6 +9174,29 @@ mod tests {
         app.update();
         let reds = app.world_mut().query_filtered::<(), With<Red>>().iter(app.world()).count();
         assert_eq!(reds, 2, "a plain shot splits a red into two smaller reds — the whack-a-mole");
+    }
+
+    #[test]
+    fn aim_assist_snaps_only_within_a_tight_cone() {
+        let ship = Vec2::ZERO;
+        let aim = Vec2::X; // aiming straight +X
+        let range = 2000.0;
+        // a target INSIDE the cone (half the max angle) → the shot snaps onto it
+        let inside = Vec2::from_angle(AIM_ASSIST_ANGLE * 0.5) * 300.0;
+        let d1 = assisted_aim(aim, ship, [inside].into_iter(), range);
+        assert!((d1 - inside.normalize()).length() < 1e-3, "a target inside the cone snaps the shot onto it");
+        // a target OUTSIDE the cone (double the max angle) → fires straight, no bend
+        let outside = Vec2::from_angle(AIM_ASSIST_ANGLE * 2.0) * 300.0;
+        let d2 = assisted_aim(aim, ship, [outside].into_iter(), range);
+        assert!((d2 - aim).length() < 1e-6, "a target outside the cone does NOT bend the shot");
+        // inside the cone but BEYOND the bullet's reach → ignored
+        let d3 = assisted_aim(aim, ship, [Vec2::from_angle(AIM_ASSIST_ANGLE * 0.5) * 1000.0].into_iter(), 500.0);
+        assert!((d3 - aim).length() < 1e-6, "an out-of-range target is ignored");
+        // two in-cone targets → the MORE-aligned one wins (order-independent)
+        let looser = Vec2::from_angle(AIM_ASSIST_ANGLE * 0.8) * 300.0;
+        let tighter = Vec2::from_angle(AIM_ASSIST_ANGLE * 0.2) * 400.0;
+        let d4 = assisted_aim(aim, ship, [looser, tighter].into_iter(), range);
+        assert!((d4 - tighter.normalize()).length() < 1e-3, "the most-aligned in-cone target wins");
     }
 
     #[test]

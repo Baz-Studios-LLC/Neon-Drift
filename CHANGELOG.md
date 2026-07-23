@@ -3,9 +3,12 @@
 Patch notes for the Rust + Bevy build. Newest first. (Releases are cut to GitHub and picked up by the
 Baz Studios launcher.) **Keep this current with every change** — it's the record testers read.
 
-## Unreleased
+## v0.4.1 — Aim assist (2026-07-23)
 
-_Nothing yet — work in progress lands here, then gets renamed to the next version when a release is cut._
+- **Slight aim assist.** Small targets are hard to hit dead-on, so a shot now **snaps onto a target when
+  your aim is already within a few degrees of it** (and it's within the bullet's range) — a subtle
+  forgiveness on asteroids, enemies, and the possessed vessel. You still have to be nearly on it; it won't
+  reach across the screen or lock onto anything you aren't already pointing at.
 
 ## v0.4.0 — The Haunt reforged: Possession, a cinematic finale, and a safety pass (2026-07-23)
 
