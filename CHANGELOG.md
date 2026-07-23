@@ -3,7 +3,7 @@
 Patch notes for the Rust + Bevy build. Newest first. (Releases are cut to GitHub and picked up by the
 Baz Studios launcher.) **Keep this current with every change** — it's the record testers read.
 
-## Unreleased
+## v0.4.0 — The Haunt reforged: Possession, a cinematic finale, and a safety pass (2026-07-23)
 
 Finale-fight fixes and polish (playtest feedback):
 
